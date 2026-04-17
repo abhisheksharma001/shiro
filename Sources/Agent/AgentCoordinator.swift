@@ -72,8 +72,10 @@ extension AgentCoordinator {
     ]
 }
 
-// MARK: - AgentCoordinator (ReACT Loop)
+// MARK: - AgentCoordinator
 
+/// Central agent facade. Routes queries through ACPBridge (Node + Claude SDK)
+/// when available; falls back to the legacy LM Studio ReACT loop otherwise.
 @MainActor
 final class AgentCoordinator: ObservableObject {
 
@@ -81,11 +83,27 @@ final class AgentCoordinator: ObservableObject {
     private let lmStudio: LMStudioClient
     private let knowledgeGraph: KnowledgeGraphService
 
+    /// Set by AppState once all services are ready.
+    var bridge: ACPBridge?
+
     @Published var isRunning: Bool = false
     @Published var currentTaskTitle: String = ""
     @Published var iterationCount: Int = 0
+    @Published var streamingText: String = ""
+    @Published var pendingApprovals: [ApprovalRequest] = []
 
     var onStatusUpdate: ((String) -> Void)?
+    var onStreamingToken: ((String) -> Void)?
+    var onTurnComplete: ((String) -> Void)?
+
+    struct ApprovalRequest: Identifiable {
+        let id: String           // callId
+        let sessionKey: String
+        let toolName: String
+        let input: [String: Any]
+        let justification: String?
+        let risk: ToolRisk
+    }
 
     private let systemPrompt = """
     You are Shiro, a proactive AI desktop agent running locally on Abhishek's Mac.
@@ -111,12 +129,90 @@ final class AgentCoordinator: ObservableObject {
     """
 
     init(database: ShiroDatabase, lmStudio: LMStudioClient, knowledgeGraph: KnowledgeGraphService) {
-        self.database = database
-        self.lmStudio = lmStudio
+        self.database       = database
+        self.lmStudio       = lmStudio
         self.knowledgeGraph = knowledgeGraph
     }
 
-    // MARK: - Main Entry Point
+    // MARK: - Bridge wiring
+
+    /// Connect a running ACPBridge instance and subscribe to its events.
+    func connectBridge(_ b: ACPBridge) {
+        self.bridge = b
+        b.onEvent = { [weak self] event in
+            self?.handleBridgeEvent(event)
+        }
+    }
+
+    private func handleBridgeEvent(_ event: BridgeEvent) {
+        switch event {
+
+        case .sessionReady(_, _):
+            onStatusUpdate?("Connected")
+
+        case .textDelta(_, let text):
+            streamingText += text
+            onStreamingToken?(text)
+
+        case .thinkingDelta:
+            break  // suppress from main chat for now
+
+        case .toolStarted(_, _, let name, _):
+            isRunning = true
+            onStatusUpdate?("Using \(name)…")
+
+        case .toolFinished:
+            break
+
+        case .turnComplete(_, let text, let inTok, let outTok, let cost):
+            isRunning  = false
+            streamingText = ""
+            onStatusUpdate?("Done  (\(inTok)→\(outTok) tok, $\(String(format: "%.4f", cost)))")
+            onTurnComplete?(text)
+
+        case .agentSpawned(_, let taskId):
+            onStatusUpdate?("Sub-agent spawned: \(taskId)")
+
+        case .agentDone(_, let taskId, let status, _):
+            onStatusUpdate?("Sub-agent \(taskId) \(status)")
+
+        case .approvalRequired(let callId, let sk, let name, let input, let just, let risk):
+            let req = ApprovalRequest(id: callId, sessionKey: sk, toolName: name,
+                                       input: input, justification: just, risk: risk)
+            pendingApprovals.append(req)
+
+        case .bridgeError(_, let msg):
+            isRunning = false
+            onStatusUpdate?("Error: \(msg)")
+
+        case .bridgeLog(let level, let msg):
+            if level == "error" { print("[bridge error] \(msg)") }
+        }
+    }
+
+    // MARK: - Primary entry point
+
+    /// Preferred path: send through ACPBridge (Node + Claude SDK).
+    /// Falls back to legacy ReACT loop if bridge isn't running.
+    func send(query prompt: String, sessionKey: String = "main",
+              systemPrompt: String? = nil, mode: String = "act") async throws -> String {
+        if let b = bridge, b.isRunning {
+            // Reset streaming buffer.
+            streamingText = ""
+            isRunning     = true
+            currentTaskTitle = String(prompt.prefix(60))
+            b.query(prompt, sessionKey: sessionKey, systemPrompt: systemPrompt,
+                    cwd: nil, mode: mode, model: nil)
+            // Result arrives asynchronously via handleBridgeEvent(.turnComplete).
+            // Callers who need the final text should observe `onTurnComplete`.
+            return ""
+        } else {
+            // Legacy fallback.
+            return try await run(query: prompt)
+        }
+    }
+
+    // MARK: - Legacy ReACT Loop
 
     /// Run a user query through the full ReACT loop.
     func run(query: String, sessionId: String = UUID().uuidString) async throws -> String {

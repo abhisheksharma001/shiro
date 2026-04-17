@@ -150,6 +150,21 @@ final class ScreenCaptureService: NSObject {
 
     // MARK: - ScreenCaptureKit
 
+    /// Capture one frame and return it as JPEG data.
+    /// Used by ACPBridge to fulfill `capture_screenshot` tool calls.
+    func captureFrame() async throws -> Data {
+        guard let image = await captureScreen() else {
+            throw ScreenCaptureError.captureFailedNoImage
+        }
+        let nsImage = NSImage(cgImage: image, size: .zero)
+        guard let tiffData = nsImage.tiffRepresentation,
+              let bitmap   = NSBitmapImageRep(data: tiffData),
+              let jpeg     = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.8]) else {
+            throw ScreenCaptureError.encodingFailed
+        }
+        return jpeg
+    }
+
     private func captureScreen() async -> CGImage? {
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -225,6 +240,20 @@ final class ScreenCaptureService: NSObject {
             errorsVisible: false,
             actionSuggestion: nil
         )
+    }
+}
+
+// MARK: - ScreenCaptureError
+
+enum ScreenCaptureError: LocalizedError {
+    case captureFailedNoImage
+    case encodingFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .captureFailedNoImage: return "Screen capture returned no image"
+        case .encodingFailed:       return "Failed to encode screenshot as JPEG"
+        }
     }
 }
 

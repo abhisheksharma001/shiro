@@ -167,7 +167,11 @@ struct FloatingBarView: View {
 
     private var stopButton: some View {
         Button {
-            // TODO: interrupt agent
+            appState.acpBridge?.interrupt(sessionKey: "main")
+            appState.agentCoordinator?.bridge?.interrupt(sessionKey: "main")
+            appState.isProcessing = false
+            appState.agentStatus = .idle
+            isTyping = false
         } label: {
             Image(systemName: "stop.circle.fill")
                 .font(.system(size: 22))
@@ -246,27 +250,41 @@ struct FloatingBarView: View {
 
     private func sendMessage() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty, let coordinator = appState.agentCoordinator else { return }
         inputText = ""
 
         messages.append(DisplayMessage(role: .user, content: text))
+        // Placeholder streaming bubble.
+        messages.append(DisplayMessage(role: .assistant, content: ""))
         isTyping = true
         appState.isProcessing = true
         appState.agentStatus = .thinking
 
+        // Wire up streaming tokens into the last message.
+        coordinator.onStreamingToken = { [self] token in
+            guard let last = messages.indices.last else { return }
+            var updated = messages[last]
+            updated = DisplayMessage(role: .assistant, content: updated.content + token)
+            messages[last] = updated
+        }
+        coordinator.onTurnComplete = { [self] _ in
+            isTyping = false
+            appState.isProcessing = false
+            appState.agentStatus = .idle
+            coordinator.onStreamingToken = nil
+            coordinator.onTurnComplete = nil
+        }
+
         Task {
             do {
-                let response = try await appState.agentCoordinator?.run(query: text) ?? "Agent not initialized"
-                await MainActor.run {
-                    isTyping = false
-                    messages.append(DisplayMessage(role: .assistant, content: response))
-                    appState.isProcessing = false
-                    appState.agentStatus = .idle
-                }
+                _ = try await coordinator.send(query: text)
             } catch {
                 await MainActor.run {
                     isTyping = false
-                    messages.append(DisplayMessage(role: .assistant, content: "❌ \(error.localizedDescription)"))
+                    if let last = messages.indices.last {
+                        messages[last] = DisplayMessage(role: .assistant,
+                                                         content: "❌ \(error.localizedDescription)")
+                    }
                     appState.isProcessing = false
                     appState.agentStatus = .error(error.localizedDescription)
                 }

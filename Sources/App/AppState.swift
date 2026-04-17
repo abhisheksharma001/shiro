@@ -25,6 +25,7 @@ final class AppState: ObservableObject {
     private(set) var screenCapture: ScreenCaptureService?
     private(set) var agentCoordinator: AgentCoordinator?
     private(set) var knowledgeGraph: KnowledgeGraphService?
+    private(set) var acpBridge: ACPBridge?
 
     private init() {}
 
@@ -56,11 +57,30 @@ final class AppState: ObservableObject {
             self.screenCapture = ScreenCaptureService(lmStudio: lm, database: db)
 
             // 6. Agent coordinator
-            self.agentCoordinator = AgentCoordinator(
+            let coordinator = AgentCoordinator(
                 database: db,
                 lmStudio: lm,
                 knowledgeGraph: knowledgeGraph!
             )
+            self.agentCoordinator = coordinator
+
+            // 7. ACP bridge — Node subprocess that drives Claude Agent SDK
+            let bridge = ACPBridge(
+                database:      db,
+                knowledgeGraph: knowledgeGraph!,
+                lmStudio:      lm,
+                screenCapture: screenCapture!
+            )
+            self.acpBridge = bridge
+
+            do {
+                try bridge.launch()
+                coordinator.connectBridge(bridge)
+                print("[Shiro] ✅ ACP bridge launched (PID \(bridge.bridgePID))")
+            } catch {
+                self.errorMessage = "ACP bridge failed to start: \(error.localizedDescription)"
+                print("[Shiro] ⚠️  ACP bridge unavailable, falling back to legacy loop: \(error)")
+            }
 
             print("[Shiro] ✅ Initialized — LM Studio: \(lmStudioConnected), Models: \(activeModels.count)")
         } catch {
