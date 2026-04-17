@@ -220,16 +220,20 @@ final class ACPBridge {
     private weak var lmStudio: LMStudioClient?
     private weak var screenCapture: ScreenCaptureService?
 
+    /// Set by AppState once ConsentGate and SubAgentManager are ready.
+    var consentGate: ConsentGate?
+    var subAgentManager: SubAgentManager?
+
     // MARK: - Init
 
     init(database: ShiroDatabase,
          knowledgeGraph: KnowledgeGraphService,
          lmStudio: LMStudioClient,
          screenCapture: ScreenCaptureService) {
-        self.database      = database
+        self.database       = database
         self.knowledgeGraph = knowledgeGraph
-        self.lmStudio      = lmStudio
-        self.screenCapture = screenCapture
+        self.lmStudio       = lmStudio
+        self.screenCapture  = screenCapture
     }
 
     // MARK: - Launch
@@ -381,17 +385,31 @@ final class ACPBridge {
 
             onEvent?(.toolStarted(sessionKey: sk, callId: callId, name: name, input: input))
 
-            if risk.requiresExplicitApproval {
-                // Stash and fire approvalRequired — UI must call resolveApproval().
-                let approval = PendingApproval(callId: callId, sessionKey: sk, name: name,
-                                               input: input, justification: msg.justification, risk: risk)
-                pendingApprovals[callId] = approval
-                onEvent?(.approvalRequired(callId: callId, sessionKey: sk, name: name,
-                                           input: input, justification: msg.justification, risk: risk))
-            } else {
-                // Low/med — auto-execute.
-                Task { [weak self] in
-                    await self?.executeToolAndReply(callId: callId, sessionKey: sk, name: name, input: input)
+            // Route through ConsentGate — it handles policy, risk, UI blocking.
+            Task { [weak self] in
+                guard let self else { return }
+                if let gate = self.consentGate {
+                    let decision = await gate.evaluate(
+                        callId:        callId,
+                        sessionKey:    sk,
+                        toolName:      name,
+                        input:         input,
+                        justification: msg.justification,
+                        risk:          risk
+                    )
+                    switch decision {
+                    case .approved:
+                        await self.executeToolAndReply(callId: callId, sessionKey: sk, name: name, input: input)
+                    case .denied, .rememberDeny:
+                        let denialReason: String?
+                        if case .denied(let r) = decision { denialReason = r }
+                        else { denialReason = "Blocked by remember-deny policy" }
+                        self.send(.toolResult(callId: callId, result: "",
+                                              isError: false, denied: true, denialReason: denialReason))
+                    }
+                } else {
+                    // No gate wired yet — auto-approve everything (startup race guard).
+                    await self.executeToolAndReply(callId: callId, sessionKey: sk, name: name, input: input)
                 }
             }
 
@@ -399,16 +417,30 @@ final class ACPBridge {
             break  // UI uses these for spinners; bubbled via toolStarted/toolFinished.
 
         case "result":
+            let costUsd = msg.costUsd ?? 0
             onEvent?(.turnComplete(
                 sessionKey:   sk,
                 text:         msg.text ?? "",
                 inputTokens:  msg.inputTokens  ?? 0,
                 outputTokens: msg.outputTokens ?? 0,
-                costUsd:      msg.costUsd       ?? 0
+                costUsd:      costUsd
             ))
+            // Accrue cost for sub-agent budget enforcement.
+            if costUsd > 0, let sam = subAgentManager {
+                Task {
+                    let exceeded = await sam.recordCost(sessionKey: sk, costUsd: costUsd)
+                    if exceeded {
+                        // Kill the session.
+                        self.send(.interrupt(sessionKey: sk))
+                    }
+                }
+            }
 
         case "error":
             onEvent?(.bridgeError(sessionKey: sk, message: msg.message ?? "unknown error"))
+            if let sam = subAgentManager, sk != "main" {
+                Task { await sam.markFailed(sessionKey: sk, error: msg.message ?? "unknown") }
+            }
 
         case "agent_started":
             if let taskId = msg.taskId {
@@ -417,9 +449,18 @@ final class ACPBridge {
 
         case "agent_finished":
             if let taskId = msg.taskId {
-                onEvent?(.agentDone(sessionKey: sk, taskId: taskId,
-                                    status: msg.status ?? "completed",
-                                    summary: msg.summary ?? ""))
+                let status  = msg.status  ?? "completed"
+                let summary = msg.summary ?? ""
+                onEvent?(.agentDone(sessionKey: sk, taskId: taskId, status: status, summary: summary))
+                if let sam = subAgentManager {
+                    Task {
+                        if status == "completed" {
+                            await sam.markCompleted(sessionKey: sk, result: summary, totalCostUsd: 0)
+                        } else {
+                            await sam.markFailed(sessionKey: sk, error: summary)
+                        }
+                    }
+                }
             }
 
         case "log":
@@ -513,6 +554,24 @@ final class ACPBridge {
                 return ToolResult(text: "Error: missing taskId, persona, or prompt", isError: true)
             }
             let sessionKey = "agent:\(taskId)"
+            let costBudget = input["costBudgetUsd"] as? Double
+            let depthBdgt  = int("depthBudget")
+
+            // Depth + budget registration — blocks spawn if limits exceeded.
+            if let sam = subAgentManager {
+                if let err = await sam.registerSession(
+                    sessionKey:    sessionKey,
+                    taskId:        taskId,
+                    parentKey:     "main",
+                    persona:       persona,
+                    model:         str("model"),
+                    costBudgetUsd: costBudget,
+                    depthBudget:   depthBdgt
+                ) {
+                    return ToolResult(text: "Sub-agent blocked: \(err)", isError: true)
+                }
+            }
+
             send(.spawnAgent(
                 sessionKey:    sessionKey,
                 parentKey:     "main",
@@ -520,8 +579,8 @@ final class ACPBridge {
                 persona:       persona,
                 prompt:        prompt,
                 model:         str("model"),
-                costBudgetUsd: input["costBudgetUsd"] as? Double,
-                depthBudget:   int("depthBudget"),
+                costBudgetUsd: costBudget,
+                depthBudget:   depthBdgt,
                 cwd:           nil
             ))
             return ToolResult(text: "Sub-agent spawned as session \"\(sessionKey)\"", isError: false)

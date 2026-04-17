@@ -26,6 +26,8 @@ final class AppState: ObservableObject {
     private(set) var agentCoordinator: AgentCoordinator?
     private(set) var knowledgeGraph: KnowledgeGraphService?
     private(set) var acpBridge: ACPBridge?
+    private(set) var consentGate: ConsentGate?
+    private(set) var subAgentManager: SubAgentManager?
 
     private init() {}
 
@@ -64,13 +66,21 @@ final class AppState: ObservableObject {
             )
             self.agentCoordinator = coordinator
 
-            // 7. ACP bridge — Node subprocess that drives Claude Agent SDK
+            // 7. Consent Gate + Sub-agent manager
+            let gate = ConsentGate(database: db)
+            self.consentGate    = gate
+            let sam = SubAgentManager(database: db)
+            self.subAgentManager = sam
+
+            // 8. ACP bridge — Node subprocess that drives Claude Agent SDK
             let bridge = ACPBridge(
-                database:      db,
+                database:       db,
                 knowledgeGraph: knowledgeGraph!,
-                lmStudio:      lm,
-                screenCapture: screenCapture!
+                lmStudio:       lm,
+                screenCapture:  screenCapture!
             )
+            bridge.consentGate    = gate
+            bridge.subAgentManager = sam
             self.acpBridge = bridge
 
             do {

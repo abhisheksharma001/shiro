@@ -36,32 +36,39 @@ struct FloatingBarView: View {
     private let textColor = Color(hex: "#E8E8E8")
 
     var body: some View {
-        ZStack {
-            // Window background
-            RoundedRectangle(cornerRadius: isExpanded ? 16 : 30)
-                .fill(bg)
-                .overlay(
-                    RoundedRectangle(cornerRadius: isExpanded ? 16 : 30)
-                        .strokeBorder(muted, lineWidth: 1)
-                )
-                .shadow(color: .black.opacity(0.6), radius: 20, y: 4)
+        VStack(spacing: 8) {
+            // ── Approval cards (above the bar) ─────────────────────
+            if let gate = appState.consentGate, !gate.pendingApprovals.isEmpty {
+                ApprovalQueueOverlay(gate: gate)
+            }
 
-            VStack(spacing: 0) {
-                // ── Main Bar ───────────────────────────────────────
-                mainBar
+            // ── Main floating bar ───────────────────────────────────
+            ZStack {
+                RoundedRectangle(cornerRadius: isExpanded ? 16 : 30)
+                    .fill(bg)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: isExpanded ? 16 : 30)
+                            .strokeBorder(muted, lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.6), radius: 20, y: 4)
 
-                // ── Expanded Chat Area ─────────────────────────────
-                if isExpanded {
-                    Divider().background(muted).padding(.horizontal, 16)
-                    chatArea
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .top).combined(with: .opacity),
-                            removal: .move(edge: .top).combined(with: .opacity)
-                        ))
+                VStack(spacing: 0) {
+                    // ── Main Bar ─────────────────────────────────────
+                    mainBar
+
+                    // ── Expanded Chat Area ────────────────────────────
+                    if isExpanded {
+                        Divider().background(muted).padding(.horizontal, 16)
+                        chatArea
+                            .transition(.asymmetric(
+                                insertion: .move(edge: .top).combined(with: .opacity),
+                                removal:   .move(edge: .top).combined(with: .opacity)
+                            ))
+                    }
                 }
             }
+            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isExpanded)
         }
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isExpanded)
         .onAppear { checkLMStudio() }
     }
 
