@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Shiro</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.abhishek.shiro</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Shiro needs microphone access for voice input and meeting transcription.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Shiro needs screen capture to understand what you're working on and assist proactively.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Shiro uses Apple Events to detect and control active applications.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,45 @@
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+secrets/
+
+# Local database
+shiro.db
+shiro.db-*
+*.sqlite
+*.sqlite-*
+*.db-wal
+*.db-shm
+
+# Swift / Xcode
+.DS_Store
+.build/
+DerivedData/
+.swiftpm/
+*.xcuserstate
+*.xcuserdatad
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.o
+*.d
+Package.resolved
+
+# Node (for upcoming acp-bridge/)
+node_modules/
+dist/
+*.tsbuildinfo
+.npm/
+.pnpm-store/
+
+# Logs / tmp
+*.log
+logs/
+tmp/
+.cache/
+
+# User data
+HANDOFF.md.bak
+~/.shiro/
