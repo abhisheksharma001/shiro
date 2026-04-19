@@ -5,11 +5,8 @@ let package = Package(
     name: "Shiro",
     platforms: [.macOS(.v14)],
     dependencies: [
-        // SQLite ORM
         .package(url: "https://github.com/groue/GRDB.swift", from: "6.0.0"),
-        // Markdown rendering
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.0.2"),
-        // Keyboard shortcuts
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "2.0.0"),
     ],
     targets: [
@@ -21,12 +18,11 @@ let package = Package(
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts"),
             ],
             path: "Sources",
-            resources: [
-                .process("../Resources"),
-            ],
-            swiftSettings: [
-                .unsafeFlags(["-enable-actor-data-race-checks"]),
-            ]
+            // Info.plist is consumed by Xcode (INFOPLIST_FILE) — exclude it
+            // from the SwiftPM resource scan so SPM doesn't warn about an
+            // unhandled / duplicate resource.
+            exclude: ["App/Info.plist"]
+            // Add .process("App/Assets.xcassets") here when you add an asset catalog.
         ),
     ]
 )

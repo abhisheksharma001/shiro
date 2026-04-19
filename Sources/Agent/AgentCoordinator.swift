@@ -84,7 +84,8 @@ final class AgentCoordinator: ObservableObject {
     private let knowledgeGraph: KnowledgeGraphService
 
     /// Set by AppState once all services are ready.
-    var bridge: ACPBridge?
+    /// Can be any BridgeRouter implementation (ACPBridge or ClaudeCodeRouter).
+    var bridge: (any BridgeRouter)?
 
     @Published var isRunning: Bool = false
     @Published var currentTaskTitle: String = ""
@@ -136,8 +137,8 @@ final class AgentCoordinator: ObservableObject {
 
     // MARK: - Bridge wiring
 
-    /// Connect a running ACPBridge instance and subscribe to its events.
-    func connectBridge(_ b: ACPBridge) {
+    /// Connect a running bridge router and subscribe to its events.
+    func connectBridge(_ b: any BridgeRouter) {
         self.bridge = b
         b.onEvent = { [weak self] event in
             self?.handleBridgeEvent(event)
@@ -202,7 +203,7 @@ final class AgentCoordinator: ObservableObject {
             isRunning     = true
             currentTaskTitle = String(prompt.prefix(60))
             b.query(prompt, sessionKey: sessionKey, systemPrompt: systemPrompt,
-                    cwd: nil, mode: mode, model: nil)
+                    cwd: nil, mode: mode, model: nil, resume: nil)
             // Result arrives asynchronously via handleBridgeEvent(.turnComplete).
             // Callers who need the final text should observe `onTurnComplete`.
             return ""
@@ -395,27 +396,41 @@ final class AgentCoordinator: ObservableObject {
     // MARK: - Tool Implementations
 
     private func runShell(_ command: String) async -> String {
-        await withCheckedContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-c", command]
+        // Run off the main actor so Process fork/exec doesn't stall the UI.
+        await withCheckedContinuation { (continuation: CheckedContinuation<String, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+                process.arguments = ["-c", command]
 
-            let stdout = Pipe()
-            let stderr = Pipe()
-            process.standardOutput = stdout
-            process.standardError = stderr
+                let stdout = Pipe()
+                let stderr = Pipe()
+                process.standardOutput = stdout
+                process.standardError = stderr
 
-            process.terminationHandler = { _ in
-                let out = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                let result = [out, err].filter { !$0.isEmpty }.joined(separator: "\n")
-                continuation.resume(returning: result.isEmpty ? "(no output)" : String(result.prefix(4000)))
-            }
+                // Guard against double-resume if run() throws after
+                // terminationHandler also fires (rare but defensive).
+                let resumeLock = NSLock()
+                var didResume  = false
+                func resumeOnce(_ s: String) {
+                    resumeLock.lock(); defer { resumeLock.unlock() }
+                    guard !didResume else { return }
+                    didResume = true
+                    continuation.resume(returning: s)
+                }
 
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(returning: "Shell error: \(error.localizedDescription)")
+                process.terminationHandler = { _ in
+                    let out = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    let result = [out, err].filter { !$0.isEmpty }.joined(separator: "\n")
+                    resumeOnce(result.isEmpty ? "(no output)" : String(result.prefix(4000)))
+                }
+
+                do {
+                    try process.run()
+                } catch {
+                    resumeOnce("Shell error: \(error.localizedDescription)")
+                }
             }
         }
     }
@@ -427,14 +442,23 @@ final class AgentCoordinator: ObservableObject {
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             struct DDGResponse: Decodable {
-                let AbstractText: String?
-                let RelatedTopics: [Topic]?
-                struct Topic: Decodable { let Text: String? }
+                let abstractText: String?
+                let relatedTopics: [Topic]?
+
+                enum CodingKeys: String, CodingKey {
+                    case abstractText  = "AbstractText"
+                    case relatedTopics = "RelatedTopics"
+                }
+
+                struct Topic: Decodable {
+                    let text: String?
+                    enum CodingKeys: String, CodingKey { case text = "Text" }
+                }
             }
             let resp = try JSONDecoder().decode(DDGResponse.self, from: data)
             var results: [String] = []
-            if let abstract = resp.AbstractText, !abstract.isEmpty { results.append(abstract) }
-            let topics = resp.RelatedTopics?.prefix(5).compactMap(\.Text) ?? []
+            if let abstract = resp.abstractText, !abstract.isEmpty { results.append(abstract) }
+            let topics = resp.relatedTopics?.prefix(5).compactMap(\.text) ?? []
             results.append(contentsOf: topics)
             return results.isEmpty ? "No results found" : results.joined(separator: "\n\n")
         } catch {
@@ -449,24 +473,28 @@ final class AgentCoordinator: ObservableObject {
         task.assignedAgent = "sub_\(UUID().uuidString.prefix(4))"
         task.startedAt = Date()
 
-        try? await database.pool.write { db in try task.insert(db) }
+        // Snapshot before crossing a Sendable closure boundary.
+        let taskSnap = task
+        try? await database.pool.write { db in try taskSnap.insert(db) }
 
         do {
             // Sub-agent runs with same coordinator but separate session
-            let result = try await run(query: description, sessionId: "sub_\(task.id)")
+            let result = try await run(query: description, sessionId: "sub_\(taskSnap.id)")
 
-            // Mark task done
-            var completed = task
-            completed.status = "done"
-            completed.result = result
+            // Mark task done — build the completed record as a `let` snapshot.
+            var completed = taskSnap
+            completed.status      = "done"
+            completed.result      = result
             completed.completedAt = Date()
-            try? await database.pool.write { db in try completed.update(db) }
+            let doneSnap = completed
+            try? await database.pool.write { db in try doneSnap.update(db) }
 
             return "Sub-agent completed '\(title)':\n\(result.prefix(1000))"
         } catch {
-            var failed = task
+            var failed = taskSnap
             failed.status = "cancelled"
-            try? await database.pool.write { db in try failed.update(db) }
+            let failSnap = failed
+            try? await database.pool.write { db in try failSnap.update(db) }
             return "Sub-agent failed for '\(title)': \(error.localizedDescription)"
         }
     }

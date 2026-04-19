@@ -192,6 +192,83 @@ final class ShiroDatabase {
             }
         }
 
+        // ── v3: Vector RAG ────────────────────────────────────────────────
+        migrator.registerMigration("v3_vector_rag") { db in
+
+            // Primary chunk store — one row per ~512-token passage.
+            try db.create(table: "memory_chunks", ifNotExists: true) { t in
+                t.primaryKey("id", .text)
+                t.column("corpus", .text).notNull()
+                // code | papers | meetings | screen | chat | skills | kg | docs
+                t.column("source", .text).notNull()      // file path, url, session_id, …
+                t.column("source_id", .text)             // FK to source table row (optional)
+                t.column("chunk_idx", .integer).notNull().defaults(to: 0)
+                t.column("content", .text).notNull()
+                t.column("embedding", .blob)             // float32[768], little-endian
+                t.column("embedding_dim", .integer).notNull().defaults(to: 768)
+                t.column("token_count", .integer).notNull().defaults(to: 0)
+                t.column("metadata_json", .text)         // lang, file_ext, line_range, …
+                t.column("created_at", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+                t.column("updated_at", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+            }
+            try db.create(indexOn: "memory_chunks", columns: ["corpus"])
+            try db.create(indexOn: "memory_chunks", columns: ["source"])
+            try db.create(indexOn: "memory_chunks", columns: ["updated_at"])
+
+            // FTS5 virtual table for keyword search over chunk content.
+            // Content= triggers keep it in sync with memory_chunks automatically.
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_chunks_fts
+                USING fts5(
+                    content,
+                    content='memory_chunks',
+                    content_rowid='rowid',
+                    tokenize='porter unicode61'
+                )
+            """)
+
+            // Triggers to keep FTS in sync.
+            try db.execute(sql: """
+                CREATE TRIGGER IF NOT EXISTS memory_chunks_ai
+                AFTER INSERT ON memory_chunks BEGIN
+                    INSERT INTO memory_chunks_fts(rowid, content)
+                    VALUES (new.rowid, new.content);
+                END
+            """)
+            try db.execute(sql: """
+                CREATE TRIGGER IF NOT EXISTS memory_chunks_ad
+                AFTER DELETE ON memory_chunks BEGIN
+                    INSERT INTO memory_chunks_fts(memory_chunks_fts, rowid, content)
+                    VALUES ('delete', old.rowid, old.content);
+                END
+            """)
+            try db.execute(sql: """
+                CREATE TRIGGER IF NOT EXISTS memory_chunks_au
+                AFTER UPDATE ON memory_chunks BEGIN
+                    INSERT INTO memory_chunks_fts(memory_chunks_fts, rowid, content)
+                    VALUES ('delete', old.rowid, old.content);
+                    INSERT INTO memory_chunks_fts(rowid, content)
+                    VALUES (new.rowid, new.content);
+                END
+            """)
+
+            // Ingest job queue — background workers pick from here.
+            try db.create(table: "ingest_jobs", ifNotExists: true) { t in
+                t.primaryKey("id", .text)
+                t.column("source_path", .text).notNull()
+                t.column("corpus", .text).notNull()
+                t.column("status", .text).notNull().defaults(to: "pending")
+                // pending | processing | done | failed
+                t.column("chunk_count", .integer).notNull().defaults(to: 0)
+                t.column("error", .text)
+                t.column("file_mtime", .double)          // mtime at ingest time
+                t.column("created_at", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+                t.column("completed_at", .datetime)
+            }
+            try db.execute(sql: "CREATE UNIQUE INDEX IF NOT EXISTS idx_ingest_jobs_source_path ON ingest_jobs (source_path)")
+            try db.create(indexOn: "ingest_jobs", columns: ["status"])
+        }
+
         try migrator.migrate(pool)
         print("[DB] ✅ Migrations complete")
     }
@@ -463,6 +540,88 @@ struct ToolPolicy: Codable, FetchableRecord, PersistableRecord {
         case policy
         case toolName  = "tool_name"
         case updatedAt = "updated_at"
+    }
+}
+
+// MARK: - Memory Chunk (Vector RAG)
+
+struct MemoryChunk: Codable, FetchableRecord, PersistableRecord, Identifiable {
+    static let databaseTableName = "memory_chunks"
+    var id: String
+    var corpus: String             // code | papers | meetings | screen | chat | skills | kg | docs
+    var source: String             // file path, url, session_id, …
+    var sourceId: String?          // FK to source table row (optional)
+    var chunkIdx: Int
+    var content: String
+    var embedding: Data?           // float32[768], little-endian
+    var embeddingDim: Int
+    var tokenCount: Int
+    var metadataJSON: String?      // lang, file_ext, line_range, …
+    var createdAt: Date
+    var updatedAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id, corpus, source, content, embedding
+        case sourceId      = "source_id"
+        case chunkIdx      = "chunk_idx"
+        case embeddingDim  = "embedding_dim"
+        case tokenCount    = "token_count"
+        case metadataJSON  = "metadata_json"
+        case createdAt     = "created_at"
+        case updatedAt     = "updated_at"
+    }
+
+    static func new(corpus: String, source: String, chunkIdx: Int,
+                    content: String, tokenCount: Int,
+                    metadata: [String: String]? = nil) -> MemoryChunk {
+        let metaJSON = metadata.flatMap {
+            (try? JSONSerialization.data(withJSONObject: $0))
+                .flatMap { String(data: $0, encoding: .utf8) }
+        }
+        return MemoryChunk(
+            id: UUID().uuidString,
+            corpus: corpus,
+            source: source,
+            sourceId: nil,
+            chunkIdx: chunkIdx,
+            content: content,
+            embedding: nil,
+            embeddingDim: 768,
+            tokenCount: tokenCount,
+            metadataJSON: metaJSON,
+            createdAt: Date(),
+            updatedAt: Date()
+        )
+    }
+}
+
+// MARK: - Ingest Job
+
+struct IngestJob: Codable, FetchableRecord, PersistableRecord, Identifiable {
+    static let databaseTableName = "ingest_jobs"
+    var id: String
+    var sourcePath: String
+    var corpus: String
+    var status: String             // pending | processing | done | failed
+    var chunkCount: Int
+    var error: String?
+    var fileMtime: Double?
+    var createdAt: Date
+    var completedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id, corpus, status, error
+        case sourcePath  = "source_path"
+        case chunkCount  = "chunk_count"
+        case fileMtime   = "file_mtime"
+        case createdAt   = "created_at"
+        case completedAt = "completed_at"
+    }
+
+    static func new(sourcePath: String, corpus: String, fileMtime: Double? = nil) -> IngestJob {
+        IngestJob(id: UUID().uuidString, sourcePath: sourcePath, corpus: corpus,
+                  status: "pending", chunkCount: 0, error: nil,
+                  fileMtime: fileMtime, createdAt: Date(), completedAt: nil)
     }
 }
 

@@ -12,8 +12,7 @@ import GRDB
 //   4. Cost guard — stops agents that exceed their costBudgetUsd
 //   5. Lifecycle tracking — transitions agent_sessions rows as bridge events arrive
 
-@MainActor
-final class SubAgentManager: ObservableObject {
+actor SubAgentManager {
 
     // MARK: - Configuration
 
@@ -32,9 +31,9 @@ final class SubAgentManager: ObservableObject {
         let depthBudget: Int
     }
 
-    @Published var activeSessions: [String: RunningSession] = [:]
-    @Published var completedCount: Int = 0
-    @Published var failedCount: Int    = 0
+    var activeSessions: [String: RunningSession] = [:]
+    var completedCount: Int = 0
+    var failedCount: Int    = 0
 
     private let db: ShiroDatabase
 
@@ -137,26 +136,30 @@ final class SubAgentManager: ObservableObject {
         guard let budget = session.costBudgetUsd else { return false }
         let exceeded = session.costAccrued >= budget
 
+        // Immutable snapshot to cross the Sendable closure boundary.
+        let snapshot = session
+        let key = sessionKey
+
         // Update DB cost column regardless.
         do {
             try await db.pool.write { conn in
                 try conn.execute(
                     sql: "UPDATE agent_sessions SET cost_usd = ? WHERE id = ?",
-                    arguments: [session.costAccrued, sessionKey]
+                    arguments: [snapshot.costAccrued, key]
                 )
                 if exceeded {
                     try conn.execute(
                         sql: "UPDATE agent_sessions SET status = 'budget_exceeded', completed_at = CURRENT_TIMESTAMP WHERE id = ?",
-                        arguments: [sessionKey]
+                        arguments: [key]
                     )
                 }
             }
         } catch {
-            print("[SubAgentManager] recordCost DB error: \(error)")
+            print("[SubAgentManager] recordCost DB error: \(error.localizedDescription)")
         }
 
         if exceeded {
-            print("[SubAgentManager] ⚠️  Session '\(sessionKey)' exceeded budget \(budget) USD (accrued \(session.costAccrued))")
+            print("[SubAgentManager] ⚠️  Session '\(key)' exceeded budget \(budget) USD (accrued \(snapshot.costAccrued))")
         }
         return exceeded
     }

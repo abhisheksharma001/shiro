@@ -24,6 +24,10 @@ final class STTService: NSObject, ObservableObject {
     private var deepgramWS: URLSessionWebSocketTask?
     private var wsSession: URLSession?
 
+    /// Serial queue that protects `whisperChunkBuffer` from concurrent
+    /// access by the audio-render thread and main actor.
+    private let bufferQueue = DispatchQueue(label: "shiro.stt.buffer")
+
     // Buffer for meeting mode
     private var transcriptBuffer: [TranscriptSegment] = []
     private var meetingFlushTimer: Timer?
@@ -55,10 +59,21 @@ final class STTService: NSObject, ObservableObject {
         liveTranscript = ""
         transcriptBuffer = []
 
-        if let key = deepgramKey {
-            startDeepgramStream(apiKey: key)
-        } else {
-            startWhisperChunkedMode()
+        // Request mic permission first; only start engine on grant.
+        Task { @MainActor in
+            do {
+                try await self.requestMicPermission()
+            } catch {
+                print("[STT] Mic permission denied: \(error.localizedDescription)")
+                self.isRecording = false
+                return
+            }
+
+            if let key = self.deepgramKey {
+                self.startDeepgramStream(apiKey: key)
+            } else {
+                self.startWhisperChunkedMode()
+            }
         }
 
         // Flush buffer every 2 minutes for task extraction
@@ -138,7 +153,11 @@ final class STTService: NSObject, ObservableObject {
         let transcript = response.channel?.alternatives?.first?.transcript ?? ""
         guard !transcript.isEmpty else { return }
 
-        if response.isFinal == true {
+        // Treat either `is_final` or `speech_final` as a boundary — Deepgram
+        // emits `speech_final` at the end of an utterance even when it hasn't
+        // closed the interim sequence yet.
+        let isBoundary = (response.isFinal == true) || (response.speechFinal == true)
+        if isBoundary {
             let segment = TranscriptSegment(
                 text: transcript,
                 timestamp: Date(),
@@ -158,9 +177,14 @@ final class STTService: NSObject, ObservableObject {
     private var whisperChunkTimer: Timer?
 
     private func startWhisperChunkedMode() {
-        // Collect audio in 15-second chunks, transcribe each via LM Studio Whisper
+        // Collect audio in 15-second chunks, transcribe each via LM Studio Whisper.
+        // The render-callback thread appends to `whisperChunkBuffer` via the
+        // serial buffer queue so concurrent reads from the flush timer are safe.
         startMicrophoneStream { [weak self] audioData in
-            self?.whisperChunkBuffer.append(audioData)
+            guard let self else { return }
+            self.bufferQueue.sync {
+                self.whisperChunkBuffer.append(audioData)
+            }
         }
 
         whisperChunkTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
@@ -171,9 +195,14 @@ final class STTService: NSObject, ObservableObject {
     }
 
     private func flushWhisperChunk() async {
-        guard !whisperChunkBuffer.isEmpty else { return }
-        let chunk = whisperChunkBuffer
-        whisperChunkBuffer = Data()
+        // Snapshot+clear under the serial queue so the render thread can't
+        // mutate the buffer while we copy it.
+        let chunk: Data = bufferQueue.sync {
+            let snapshot = whisperChunkBuffer
+            whisperChunkBuffer = Data()
+            return snapshot
+        }
+        guard !chunk.isEmpty else { return }
 
         do {
             let wavData = wrapPCMInWAV(pcmData: chunk, sampleRate: 16000, channels: 1)
@@ -187,6 +216,31 @@ final class STTService: NSObject, ObservableObject {
             onSegment?(segment)
         } catch {
             print("[STT] Whisper chunk error: \(error)")
+        }
+    }
+
+    // MARK: - Microphone Permission
+
+    /// Ask the OS for mic permission. Throws `STTError.micPermissionDenied`
+    /// if the user refuses (or has previously refused). Safe to call from
+    /// the main actor — wraps the legacy completion-handler API in a
+    /// checked continuation.
+    private func requestMicPermission() async throws {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        switch status {
+        case .authorized:
+            return
+        case .denied, .restricted:
+            throw STTError.micPermissionDenied
+        case .notDetermined:
+            let granted: Bool = await withCheckedContinuation { cont in
+                AVCaptureDevice.requestAccess(for: .audio) { ok in
+                    cont.resume(returning: ok)
+                }
+            }
+            if !granted { throw STTError.micPermissionDenied }
+        @unknown default:
+            throw STTError.micPermissionDenied
         }
     }
 
@@ -214,6 +268,7 @@ final class STTService: NSObject, ObservableObject {
     }
 
     private func recordAudio(duration: TimeInterval) async throws -> Data {
+        try await requestMicPermission()
         return try await withCheckedThrowingContinuation { continuation in
             var recorded = Data()
             let engine = AVAudioEngine()
@@ -318,10 +373,12 @@ struct TranscriptSegment {
 private struct DeepgramResponse: Decodable {
     let channel: Channel?
     let isFinal: Bool?
+    let speechFinal: Bool?
 
     enum CodingKeys: String, CodingKey {
         case channel
-        case isFinal = "is_final"
+        case isFinal     = "is_final"
+        case speechFinal = "speech_final"
     }
 
     struct Channel: Decodable {
@@ -351,8 +408,18 @@ private struct DeepgramBatchResponse: Decodable {
     }
 }
 
-enum STTError: Error {
+enum STTError: LocalizedError {
     case invalidURL
     case httpError(Int)
     case noTranscript
+    case micPermissionDenied
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL:           return "STT: invalid URL"
+        case .httpError(let code):  return "STT: HTTP \(code)"
+        case .noTranscript:         return "STT: empty transcript"
+        case .micPermissionDenied:  return "Microphone access was denied. Grant access in System Settings → Privacy & Security → Microphone."
+        }
+    }
 }

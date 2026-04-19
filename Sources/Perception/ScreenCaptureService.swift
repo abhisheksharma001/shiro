@@ -41,6 +41,10 @@ final class ScreenCaptureService: NSObject {
         super.init()
     }
 
+    deinit {
+        captureTimer?.invalidate()
+    }
+
     // MARK: - Start / Stop
 
     func startCapturing() {
@@ -68,7 +72,7 @@ final class ScreenCaptureService: NSObject {
         }
 
         // Hash to detect if screen changed
-        let hash = screenshot.hashValue
+        let hash = screenshot.stableHash
         let unchanged = hash == lastScreenHash
         lastScreenHash = hash
 
@@ -167,19 +171,19 @@ final class ScreenCaptureService: NSObject {
 
     private func captureScreen() async -> CGImage? {
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            let content = try await SCShareableContent.current
             guard let display = content.displays.first else { return nil }
 
-            let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+            let filter = SCContentFilter(display: display, excludingWindows: [])
             let config = SCStreamConfiguration()
-            config.width = Int(display.width / 2)   // half resolution is enough for vision
-            config.height = Int(display.height / 2)
+            config.width       = Int(display.width / 2)   // half resolution is enough for vision
+            config.height      = Int(display.height / 2)
             config.pixelFormat = kCVPixelFormatType_32BGRA
 
             return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
         } catch {
-            // Fallback: CGWindowListCreateImage
-            return CGWindowListCreateImage(.null, .optionOnScreenOnly, kCGNullWindowID, .bestResolution)
+            print("[Screen] ScreenCaptureKit failed: \(error.localizedDescription)")
+            return nil
         }
     }
 
@@ -189,9 +193,11 @@ final class ScreenCaptureService: NSObject {
         let axApp = AXUIElementCreateApplication(pid)
         var windowRef: CFTypeRef?
         AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &windowRef)
-        guard let window = windowRef else { return "Unknown" }
+        guard let window = windowRef,
+              CFGetTypeID(window) == AXUIElementGetTypeID() else { return "Unknown" }
+        let axWindow = window as! AXUIElement    // safe: type id checked above
         var titleRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(window as! AXUIElement, kAXTitleAttribute as CFString, &titleRef)
+        AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef)
         return (titleRef as? String) ?? "Unknown"
     }
 
@@ -267,7 +273,7 @@ private extension CGImage {
         return bitmap.representation(using: .png, properties: [.compressionFactor: 0.8])
     }
 
-    var hashValue: Int {
+    var stableHash: Int {
         // Quick perceptual hash using image dimensions + a few pixel samples
         var hasher = Hasher()
         hasher.combine(width)

@@ -95,12 +95,23 @@ final class KnowledgeGraphService {
     }
 
     func textSearch(query: String, limit: Int = 5) async throws -> [KGNode] {
-        try await database.pool.read { db in
-            try KGNode
-                .filter(Column("name").like("%\(query)%") ||
-                        Column("summary").like("%\(query)%"))
-                .limit(limit)
-                .fetchAll(db)
+        // Escape LIKE meta-characters (% _) so user input is treated literally.
+        let escaped = query
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%",  with: "\\%")
+            .replacingOccurrences(of: "_",  with: "\\_")
+        let pattern = "%\(escaped)%"
+        return try await database.pool.read { db in
+            try KGNode.fetchAll(
+                db,
+                sql: """
+                    SELECT * FROM kg_nodes
+                    WHERE name    LIKE ? ESCAPE '\\'
+                       OR summary LIKE ? ESCAPE '\\'
+                    LIMIT ?
+                """,
+                arguments: [pattern, pattern, limit]
+            )
         }
     }
 

@@ -65,13 +65,34 @@ struct ImageURL: Codable {
 }
 
 struct ToolDefinition: Codable {
-    let type: String = "function"
+    /// Computed so Swift's synthesized Codable doesn't fight the default value.
+    /// We always encode `"function"` and accept it as the only valid type on decode.
+    var type: String { "function" }
     let function: FunctionDef
 
     struct FunctionDef: Codable {
         let name: String
         let description: String
         let parameters: JSONSchema
+    }
+
+    enum CodingKeys: String, CodingKey { case type, function }
+
+    init(function: FunctionDef) {
+        self.function = function
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // `type` is advisory; ignore whatever comes in.
+        _ = try? c.decode(String.self, forKey: .type)
+        self.function = try c.decode(FunctionDef.self, forKey: .function)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode("function",  forKey: .type)
+        try c.encode(function,    forKey: .function)
     }
 }
 
@@ -322,27 +343,57 @@ final class LMStudioClient {
 
     // MARK: - Private
 
-    private func post<Req: Encodable, Resp: Decodable>(path: String, body: Req) async throws -> Resp {
+    private func post<Req: Encodable, Resp: Decodable>(
+        path: String,
+        body: Req,
+        retryOn5xx: Bool = true
+    ) async throws -> Resp {
         guard let url = URL(string: "\(baseURL)\(path)") else { throw LMError.invalidURL }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(body)
+        let encoded = try JSONEncoder().encode(body)
 
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw LMError.noResponse }
-        guard http.statusCode == 200 else {
-            let body = String(data: data, encoding: .utf8) ?? "(empty)"
-            print("[LMStudio] ❌ HTTP \(http.statusCode): \(body)")
-            throw LMError.httpError(http.statusCode)
+        // Exponential backoff: 500ms, 1s, 2s. Applied only to 5xx responses.
+        let delaysMs: [UInt64] = retryOn5xx ? [500, 1_000, 2_000] : []
+        let attempts = delaysMs.count + 1
+
+        var lastError: Error = LMError.noResponse
+
+        for attempt in 0..<attempts {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = encoded
+
+            do {
+                let (data, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse else { throw LMError.noResponse }
+
+                if (500...599).contains(http.statusCode), attempt < attempts - 1 {
+                    let delayMs = delaysMs[attempt]
+                    print("[LMStudio] ⚠️  HTTP \(http.statusCode) on \(path) — retry \(attempt + 1)/\(attempts - 1) after \(delayMs)ms")
+                    try await Task.sleep(nanoseconds: delayMs * 1_000_000)
+                    lastError = LMError.httpError(http.statusCode)
+                    continue
+                }
+
+                guard http.statusCode == 200 else {
+                    let body = String(data: data, encoding: .utf8) ?? "(empty)"
+                    print("[LMStudio] ❌ HTTP \(http.statusCode): \(body)")
+                    throw LMError.httpError(http.statusCode)
+                }
+                do {
+                    return try JSONDecoder().decode(Resp.self, from: data)
+                } catch {
+                    let raw = String(data: data, encoding: .utf8) ?? ""
+                    print("[LMStudio] ❌ Decode error: \(error.localizedDescription)\nRaw: \(raw.prefix(500))")
+                    throw error
+                }
+            } catch {
+                lastError = error
+                // Only retry on 5xx — other errors (network down, decode, etc.) bubble immediately.
+                throw error
+            }
         }
-        do {
-            return try JSONDecoder().decode(Resp.self, from: data)
-        } catch {
-            let raw = String(data: data, encoding: .utf8) ?? ""
-            print("[LMStudio] ❌ Decode error: \(error)\nRaw: \(raw.prefix(500))")
-            throw error
-        }
+        throw lastError
     }
 }
 

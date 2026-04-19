@@ -28,8 +28,32 @@ final class ConsentGate: ObservableObject {
         let justification: String?
         let risk: ToolRisk
         let requestedAt: Date = Date()
-        /// Resolved when UI (or Telegram) calls approve/deny.
-        let continuation: CheckedContinuation<ApprovalDecision, Never>
+        /// Resolved when UI (Telegram, or the timeout watchdog) calls approve/deny.
+        /// Wrapped so only the first caller wins.
+        let continuation: Resumer
+    }
+
+    /// Wraps a CheckedContinuation so exactly one of {user, timeout} resumes it.
+    final class Resumer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cont: CheckedContinuation<ApprovalDecision, Never>?
+        init(_ c: CheckedContinuation<ApprovalDecision, Never>) { self.cont = c }
+        func resume(_ decision: ApprovalDecision) {
+            lock.lock(); defer { lock.unlock() }
+            guard let c = cont else { return }
+            cont = nil
+            c.resume(returning: decision)
+        }
+    }
+
+    /// Builder helper used inside withCheckedContinuation closures.
+    private final class ContinuationResumer {
+        let resumer: Resumer
+        init(continuation: CheckedContinuation<ApprovalDecision, Never>) {
+            self.resumer = Resumer(continuation)
+        }
+        func proxy() -> Resumer { resumer }
+        func resume(_ d: ApprovalDecision) { resumer.resume(d) }
     }
 
     enum ApprovalDecision {
@@ -43,6 +67,10 @@ final class ConsentGate: ObservableObject {
     private let db: ShiroDatabase
     /// In-memory policy cache — loaded from DB on init, updated on remember_deny.
     private var policyCache: [String: String] = [:]   // toolName → "always_allow" | "always_deny" | "ask"
+    /// Optional Telegram relay for remote approval when not at the Mac.
+    var telegramRelay: TelegramRelay?
+    /// Tracks which channel resolved each callId, so audit logs the right channel.
+    private var resolveChannel: [String: String] = [:]
 
     // MARK: - Init
 
@@ -111,8 +139,13 @@ final class ConsentGate: ObservableObject {
             return .approved
 
         case .high:
-            // Blocking: suspend until UI resolves.
-            let decision = await withCheckedContinuation { cont in
+            // Blocking: suspend until UI or Telegram resolves — with a hard timeout
+            // so a dismissed dialog or offline Telegram doesn't deadlock the agent.
+            let decision = await withCheckedContinuation { (cont: CheckedContinuation<ApprovalDecision, Never>) in
+                // Single-shot resume guard — prevents double-resume if both the timeout
+                // and the user resolve simultaneously.
+                let resumer = ContinuationResumer(continuation: cont)
+
                 let approval = PendingApproval(
                     id:            callId,
                     callId:        callId,
@@ -121,22 +154,57 @@ final class ConsentGate: ObservableObject {
                     input:         input,
                     justification: justification,
                     risk:          risk,
-                    continuation:  cont
+                    continuation:  resumer.proxy()
                 )
                 pendingApprovals.append(approval)
+
+                // Fire Telegram in parallel (non-blocking) — user may not be at Mac.
+                if let relay = telegramRelay {
+                    Task {
+                        await relay.sendApprovalCard(
+                            callId:        callId,
+                            toolName:      toolName,
+                            sessionKey:    sessionKey,
+                            input:         input,
+                            justification: justification,
+                            risk:          risk.rawValue
+                        )
+                    }
+                }
+
+                // Timeout watchdog — 5 minutes, matches Config.agentTimeoutSeconds.
+                let timeout = Config.approvalTimeoutSeconds
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                    guard let self else { return }
+                    // If still pending, remove and auto-deny.
+                    if let idx = self.pendingApprovals.firstIndex(where: { $0.callId == callId }) {
+                        self.pendingApprovals.remove(at: idx)
+                        self.resolveChannel[callId] = "timeout"
+                        resumer.resume(.denied(reason: "Approval timed out after \(Int(timeout))s"))
+                    }
+                }
             }
+
+            // Determine which channel resolved (UI default, Telegram if relay set it).
+            let channel = resolveChannel.removeValue(forKey: callId) ?? "ui"
 
             // Translate to audit strings.
             let decisionStr: String
-            let channel = "ui"
             switch decision {
             case .approved:       decisionStr = "approved"
             case .denied:         decisionStr = "denied"
             case .rememberDeny:   decisionStr = "remembered_deny"
             }
+
             await audit(callId: callId, sessionKey: sessionKey, toolName: toolName,
                         input: input, risk: risk, decision: decisionStr, channel: channel,
                         justification: justification)
+
+            // Edit Telegram message to show result (if relay is wired).
+            if let relay = telegramRelay {
+                Task { await relay.markResolved(callId: callId, decision: decisionStr) }
+            }
 
             if case .rememberDeny = decision {
                 await persistPolicy(toolName: toolName, policy: "always_deny")
@@ -148,10 +216,12 @@ final class ConsentGate: ObservableObject {
     // MARK: - Resolve from UI
 
     /// Called by ApprovalCardView or TelegramRelay when user taps Approve/Deny/Remember.
-    func resolve(callId: String, decision: ApprovalDecision) {
+    /// `channel` is "ui" (default) or "telegram" — recorded in the audit log.
+    func resolve(callId: String, decision: ApprovalDecision, channel: String = "ui") {
         guard let idx = pendingApprovals.firstIndex(where: { $0.callId == callId }) else { return }
+        resolveChannel[callId] = channel
         let approval = pendingApprovals.remove(at: idx)
-        approval.continuation.resume(returning: decision)
+        approval.continuation.resume(decision)
     }
 
     // MARK: - Policy management

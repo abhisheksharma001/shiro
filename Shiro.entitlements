@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Screen Recording — required for ScreenCaptureKit -->
+    <key>com.apple.security.screen-recording</key>
+    <true/>
+    <!-- Microphone — required for STT / meeting mode -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <!-- Outbound network — LM Studio, Deepgram, Telegram, Anthropic API -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- Inbound network — Unix socket for MCP bridge -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+    <!-- File access — read ~/Projects for ingestion -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    <key>com.apple.security.files.downloads.read-write</key>
+    <true/>
+    <!-- Keychain — store API keys securely -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)com.abhishek.shiro</string>
+    </array>
+    <!-- Apple Events — detect active app -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+    <!-- App Sandbox OFF — needed to spawn node subprocess + watch filesystem -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+</dict>
+</plist>

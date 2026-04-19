@@ -26,7 +26,6 @@
  *                                 SDKMessage stream → OutboundMessage → stdout → Swift
  */
 
-import { spawn, type ChildProcess } from "child_process";
 import { createInterface } from "readline";
 import { createServer as createNetServer, type Server as NetServer, type Socket } from "net";
 import { dirname, join } from "path";
@@ -46,6 +45,17 @@ import type {
   ToolRiskLevel,
 } from "./protocol.js";
 import { startLMStudioProxy } from "./lm-studio-proxy.js";
+import { buildMCPServersMap } from "./mcp-registry.js";
+
+// Build MCP server map once at startup (file is re-read each call to support
+// hot-reload, but parsing is cheap so this caches the initial result for perf).
+// External servers are merged into every runQuery() call alongside "shiro".
+let externalMCPServers: Record<string, { type: "stdio"; command: string; args: string[]; env?: Record<string, string> }> = {};
+try {
+  externalMCPServers = buildMCPServersMap();
+} catch (err) {
+  process.stderr.write(`[bridge] mcp-registry load error (non-fatal): ${err}\n`);
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const toolsStdioPath = join(__dirname, "shiro-tools-stdio.js");
@@ -244,9 +254,9 @@ interface SessionState {
   systemPrompt?: string;
   abort: AbortController;
   running: boolean;
-  /** mcp subprocess we spawned for this session's tools (if any). Null
-   *  when we rely on SDK-managed stdio MCP (`mcpServers` config). */
-  mcpChild: ChildProcess | null;
+  /** Promise that resolves when the current runQuery() fully finishes
+   *  (including SDK teardown). Used to serialize back-to-back queries. */
+  inFlight: Promise<void> | null;
 }
 
 const sessionsByKey = new Map<string, SessionState>();
@@ -260,7 +270,7 @@ function ensureSession(sessionKey: string, cwd: string): SessionState {
     cwd,
     abort: new AbortController(),
     running: false,
-    mcpChild: null,
+    inFlight: null,
   };
   sessionsByKey.set(sessionKey, s);
   return s;
@@ -281,11 +291,38 @@ async function runQuery(
   msg: QueryMessage,
 ): Promise<void> {
   if (session.running) {
-    log("warn", `query arrived while session "${session.sessionKey}" still running; queuing not yet implemented — interrupting prior turn`);
-    session.abort.abort();
+    log("warn", `query arrived while session "${session.sessionKey}" still running; aborting prior turn`);
+    try { session.abort.abort(); } catch { /* ignore */ }
+    // Wait for the in-flight runQuery() to tear down cleanly before we
+    // kick off the replacement — otherwise its `finally { session.running = false }`
+    // can fire AFTER we set it back to true below, causing state drift.
+    if (session.inFlight) {
+      try { await session.inFlight; } catch { /* swallowed — prior turn's error is logged */ }
+    }
     session.abort = new AbortController();
   }
   session.running = true;
+
+  // Idle timeout: abort if the upstream model goes silent for 60s mid-turn.
+  const IDLE_TIMEOUT_MS = 60_000;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  const resetIdleTimer = (): void => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      log("warn", `streaming idle timeout on session "${session.sessionKey}"`);
+      try { session.abort.abort(); } catch { /* ignore */ }
+      send({
+        type: "error",
+        sessionKey: session.sessionKey,
+        sessionId: session.sessionId,
+        message: "streaming idle timeout",
+      });
+    }, IDLE_TIMEOUT_MS);
+  };
+  const clearIdleTimer = (): void => {
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+  };
+  resetIdleTimer();
 
   const mode = msg.mode ?? "act";
   const model = msg.model ?? session.model ?? "claude-sonnet-4-6";
@@ -311,12 +348,15 @@ async function runQuery(
         includePartialMessages: true,
         permissionMode: mode === "ask" ? "plan" : "default",
         mcpServers: {
+          // Built-in Shiro tool server (always present)
           shiro: {
             type: "stdio",
-            command: process.execPath,  // current Node binary
+            command: process.execPath,
             args: [toolsStdioPath],
             env: shiroEnv,
           },
+          // External servers from ~/.shiro/mcp.json
+          ...externalMCPServers,
         },
         env: {
           ...(process.env as Record<string, string | undefined>),
@@ -328,6 +368,12 @@ async function runQuery(
     });
 
     for await (const ev of q) {
+      const evType = String((ev as Record<string, unknown>).type ?? "");
+      if (evType === "stream_event" || evType === "assistant") {
+        resetIdleTimer();   // any forward progress counts as non-idle
+      } else if (evType === "result" || evType === "error") {
+        clearIdleTimer();
+      }
       dispatchSdkEvent(session, ev as Record<string, unknown>);
       if (session.abort.signal.aborted) break;
     }
@@ -341,7 +387,9 @@ async function runQuery(
       message: errMsg,
     });
   } finally {
+    clearIdleTimer();
     session.running = false;
+    session.inFlight = null;
   }
 }
 
@@ -447,9 +495,10 @@ async function handleInbound(msg: InboundMessage): Promise<void> {
     case "query": {
       const sessionKey = msg.sessionKey ?? "main";
       const session = ensureSession(sessionKey, msg.cwd ?? process.cwd());
-      runQuery(session, msg).catch((err) => {
+      const p = runQuery(session, msg).catch((err) => {
         log("error", `runQuery threw: ${err}`);
       });
+      session.inFlight = p;
       return;
     }
 
@@ -525,7 +574,9 @@ async function spawnSubAgent(msg: SpawnAgentMessage): Promise<void> {
   };
 
   try {
-    await runQuery(session, synthetic);
+    const p = runQuery(session, synthetic);
+    session.inFlight = p;
+    await p;
     send({
       type: "agent_finished",
       sessionId: session.sessionId,
@@ -557,9 +608,6 @@ function shutdown(code: number): void {
   log("info", `shutting down (code=${code})`);
   for (const s of sessionsByKey.values()) {
     try { s.abort.abort(); } catch { /* ignore */ }
-    if (s.mcpChild && !s.mcpChild.killed) {
-      try { s.mcpChild.kill("SIGTERM"); } catch { /* ignore */ }
-    }
   }
   if (bridgeSocketServer) {
     try { bridgeSocketServer.close(); } catch { /* ignore */ }
@@ -585,10 +633,28 @@ process.on("unhandledRejection", (reason) => {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  // 1. LM Studio proxy — claim a port, route SDK through it.
-  const proxyPort = await startLMStudioProxy(0);
-  process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxyPort}`;
-  process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "lm-studio";
+  // ---------------------------------------------------------------------------
+  // 1. Routing decision: real Anthropic API key → bypass LM Studio proxy.
+  //    If user has configured a real sk-ant-... key (via Keychain in Swift,
+  //    forwarded as ANTHROPIC_API_KEY env var), point the SDK directly at
+  //    Anthropic. Otherwise boot the LM Studio proxy and route through it.
+  // ---------------------------------------------------------------------------
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
+  const isByok = apiKey.startsWith("sk-ant-") || apiKey.startsWith("sk-");
+
+  if (isByok) {
+    // BYOK mode — talk directly to Anthropic.
+    // Leave ANTHROPIC_BASE_URL unset so the SDK uses its built-in default
+    // (api.anthropic.com). The key is already in the env.
+    delete process.env.ANTHROPIC_BASE_URL;
+    log("info", `BYOK mode: routing to Anthropic API (key …${apiKey.slice(-4)})`);
+  } else {
+    // Local LM Studio proxy mode (default).
+    const proxyPort = await startLMStudioProxy(0);
+    process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxyPort}`;
+    process.env.ANTHROPIC_API_KEY = "lm-studio";
+    log("info", `LM Studio proxy mode: port ${proxyPort}`);
+  }
 
   // 2. Bridge Unix socket — MCP subprocesses dial in here.
   await startBridgeSocket();
