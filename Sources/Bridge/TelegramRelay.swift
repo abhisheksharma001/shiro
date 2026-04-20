@@ -233,8 +233,13 @@ Tap a button to decide ↓
 
     // MARK: - HTTP
 
+    private func telegramURL(_ method: String) -> URL? {
+        let encoded = token.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? token
+        return URL(string: "https://api.telegram.org/bot\(encoded)/\(method)")
+    }
+
     private func apiCall(method: String, params: [String: Any]) async throws -> [String: Any] {
-        guard let url = URL(string: "https://api.telegram.org/bot\(token)/\(method)") else {
+        guard let url = telegramURL(method) else {
             throw TelegramError.invalidURL
         }
         var request = URLRequest(url: url)

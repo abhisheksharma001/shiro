@@ -300,6 +300,9 @@ final class ACPBridge: BridgeRouter {
 
     func stop() {
         send(.stop)
+        // Cancel readability handlers before terminating to avoid spurious callbacks.
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             self?.process?.terminate()
         }
@@ -356,6 +359,11 @@ final class ACPBridge: BridgeRouter {
 
     private func appendStdout(_ data: Data) {
         stdoutBuffer.append(data)
+        // Cap buffer at 4 MB; drop oldest 2 MB to prevent unbounded growth.
+        if stdoutBuffer.count > 4 * 1024 * 1024 {
+            print("[ACPBridge] ⚠️  stdout buffer overflow — dropping oldest 2MB")
+            stdoutBuffer.removeSubrange(stdoutBuffer.startIndex ..< stdoutBuffer.index(stdoutBuffer.startIndex, offsetBy: 2 * 1024 * 1024))
+        }
         while let nlRange = stdoutBuffer.firstRange(of: Data([0x0A])) {
             let lineData = Data(stdoutBuffer[stdoutBuffer.startIndex..<nlRange.lowerBound])
             stdoutBuffer.removeSubrange(stdoutBuffer.startIndex..<nlRange.upperBound)
@@ -760,11 +768,18 @@ final class ACPBridge: BridgeRouter {
             let raw   = try String(contentsOfFile: expanded, encoding: .utf8)
             let lines = raw.components(separatedBy: "\n")
             let from  = max(0, (offset ?? 1) - 1)
-            let to    = min(lines.count, from + (limit ?? 2000))
             guard from < lines.count else {
-                return ToolResult(text: "(offset beyond file end)", isError: false)
+                return ToolResult(
+                    text: "Error: offset \(from + 1) exceeds file length (\(lines.count) lines)",
+                    isError: true
+                )
             }
-            return ToolResult(text: lines[from..<to].joined(separator: "\n"), isError: false)
+            let to = min(lines.count, from + (limit ?? 2000))
+            var result = lines[from..<to].joined(separator: "\n")
+            if to < lines.count {
+                result += "\n… (\(lines.count - to) more lines)"
+            }
+            return ToolResult(text: result, isError: false)
         } catch {
             return ToolResult(text: "Error reading \(expanded): \(error.localizedDescription)", isError: true)
         }

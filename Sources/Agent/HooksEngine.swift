@@ -195,7 +195,7 @@ final class HooksEngine: ObservableObject {
 
         let fd = open(path, O_EVTONLY)
         guard fd >= 0 else {
-            print("[HooksEngine] cannot watch \(path): open() failed")
+            print("[HooksEngine] cannot watch \(path): \(String(cString: strerror(errno)))")
             return
         }
 
