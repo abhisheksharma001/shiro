@@ -356,6 +356,38 @@ final class HooksEngine: ObservableObject {
         }
     }
 
+    // MARK: - Toggle
+
+    /// Enable or disable a hook by name, persisting to hooks.json and
+    /// starting/stopping the underlying watcher/timer immediately.
+    func setEnabled(_ hookName: String, enabled: Bool) {
+        guard let idx = hooks.firstIndex(where: { $0.name == hookName }) else { return }
+        hooks[idx].enabled = enabled
+
+        // Persist
+        let file = HooksFile(hooks: hooks)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(file) {
+            try? data.write(to: Self.configURL, options: .atomic)
+        }
+
+        let hook = hooks[idx]
+        if enabled {
+            switch hook.type {
+            case "file_watch": startFileWatch(hook: hook)
+            case "schedule":   startSchedule(hook: hook)
+            case "app_launch": fire(hook: hook, reason: "re-enabled")
+            default: break
+            }
+        } else {
+            if let src = fileWatchSources.removeValue(forKey: hookName) { src.cancel() }
+            if let t   = scheduleTimers.removeValue(forKey: hookName)   { t.invalidate() }
+            if let d   = dailyTimers.removeValue(forKey: hookName)      { d.cancel() }
+            dailySchedules.removeValue(forKey: hookName)
+        }
+    }
+
     // MARK: - Defaults
 
     private func writeDefaultsIfNeeded() {

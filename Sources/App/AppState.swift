@@ -21,6 +21,26 @@ final class AppState: ObservableObject {
     /// Live bridge lifecycle state — drives the status indicator in the floating bar.
     @Published var bridgeStatus:          BridgeStatus = .starting
 
+    // MARK: - Conversation (shared between floating bar and main window)
+    @Published var conversationMessages:  [DisplayMessage] = []
+
+    // MARK: - Browser Control
+    @Published var browserControlEnabled: Bool    = false
+    @Published var latestScreenSummary:   String? = nil
+
+    // MARK: - Sub-agent display (polled from SubAgentManager actor)
+    @Published var subAgentSessions:       [SubAgentDisplayInfo] = []
+    @Published var subAgentCompletedCount: Int = 0
+    @Published var subAgentFailedCount:    Int = 0
+
+    // MARK: - UI Layout Preferences (persisted via UserDefaults)
+    @Published var uiShowAgentsPanel:  Bool = UserDefaults.standard.object(forKey: "uiShowAgentsPanel")  as? Bool ?? true
+    @Published var uiShowToolFeed:     Bool = UserDefaults.standard.object(forKey: "uiShowToolFeed")     as? Bool ?? true
+    @Published var uiSubAgentStyle:    SubAgentDisplayStyle = SubAgentDisplayStyle(rawValue: UserDefaults.standard.string(forKey: "uiSubAgentStyle") ?? "") ?? .panel
+
+    // MARK: - Tool Activity Feed (live append from bridge events)
+    @Published var toolActivityFeed:   [ToolActivityItem] = []
+
     // MARK: - Services
     private(set) var database:         ShiroDatabase?
     private(set) var lmStudio:         LMStudioClient?
@@ -267,6 +287,201 @@ final class AppState: ObservableObject {
         } else {
             errorMessage = "\(newMode.displayName) prerequisites missing"
             bridgeStatus = .offline(reason: "prerequisites missing for \(newMode.rawValue)")
+        }
+    }
+
+    // MARK: - Browser Control
+
+    func setBrowserControl(_ enabled: Bool) {
+        browserControlEnabled = enabled
+        if enabled {
+            screenCapture?.onAnalysis = { [weak self] analysis in
+                Task { @MainActor [weak self] in
+                    self?.latestScreenSummary = "[\(analysis.app)] \(analysis.windowTitle) — \(analysis.activity)"
+                }
+            }
+            screenCapture?.startCapturing()
+        } else {
+            screenCapture?.stopCapturing()
+            screenCapture?.onAnalysis = nil
+            latestScreenSummary = nil
+        }
+    }
+
+    // MARK: - Sub-agent Display Refresh (called periodically from UI)
+
+    func refreshSubAgentSessions() async {
+        guard let sam = subAgentManager else { return }
+        let sessions = await sam.activeSessions
+        let completed = await sam.completedCount
+        let failed = await sam.failedCount
+        subAgentSessions = sessions.values.map { s in
+            SubAgentDisplayInfo(
+                id: s.sessionKey,
+                taskId: s.taskId,
+                parentKey: s.parentKey,
+                depth: s.depth,
+                costAccrued: s.costAccrued,
+                costBudget: s.costBudgetUsd ?? SubAgentManager.defaultCostBudgetUsd
+            )
+        }.sorted { $0.depth < $1.depth }
+        subAgentCompletedCount = completed
+        subAgentFailedCount    = failed
+    }
+
+    // MARK: - Bridge event → UI hook
+
+    /// Called by AppDelegate after every BridgeEvent to keep toolActivityFeed
+    /// and inline toolCalls on the streaming assistant message current.
+    func handleBridgeEventForUI(_ event: BridgeEvent) {
+        switch event {
+        case .toolStarted(let sk, let callId, let name, let input):
+            // Append to global feed
+            let item = ToolActivityItem(
+                callId:     callId,
+                toolName:   name,
+                sessionKey: sk,
+                input:      input,
+                output:     nil,
+                isError:    false,
+                isRunning:  true,
+                startedAt:  Date()
+            )
+            appendToolActivity(item)
+            // Attach inline to last assistant message
+            if conversationMessages.last?.role == .assistant {
+                let idx = conversationMessages.indices.last!
+                conversationMessages[idx].toolCalls.append(ToolCallInfo(
+                    id: callId, name: name,
+                    input: (try? String(data: JSONSerialization.data(withJSONObject: input), encoding: .utf8)) ?? "",
+                    output: nil, isError: false, isRunning: true
+                ))
+            }
+            agentStatus = .acting(tool: name)
+
+        case .toolFinished(let sk, let callId, let output, let isErr):
+            // Update global feed
+            if let idx = toolActivityFeed.firstIndex(where: { $0.callId == callId }) {
+                var item = toolActivityFeed[idx]
+                // ToolActivityItem is a struct — rebuild it
+                toolActivityFeed[idx] = ToolActivityItem(
+                    callId:     item.callId,
+                    toolName:   item.toolName,
+                    sessionKey: sk,
+                    input:      item.input,
+                    output:     String(output.prefix(120)),
+                    isError:    isErr,
+                    isRunning:  false,
+                    startedAt:  item.startedAt
+                )
+            }
+            // Update inline chip on last assistant message
+            for i in conversationMessages.indices.reversed() {
+                if let j = conversationMessages[i].toolCalls.firstIndex(where: { $0.id == callId }) {
+                    conversationMessages[i].toolCalls[j].output    = String(output.prefix(80))
+                    conversationMessages[i].toolCalls[j].isError   = isErr
+                    conversationMessages[i].toolCalls[j].isRunning = false
+                    break
+                }
+            }
+
+        default:
+            break
+        }
+    }
+
+    // MARK: - Tool Activity
+
+    func appendToolActivity(_ item: ToolActivityItem) {
+        toolActivityFeed.append(item)
+        // Cap feed at 200 items
+        if toolActivityFeed.count > 200 {
+            toolActivityFeed.removeFirst(toolActivityFeed.count - 200)
+        }
+    }
+
+    // MARK: - Conversation
+
+    func clearConversation() {
+        conversationMessages.removeAll()
+        toolActivityFeed.removeAll()
+    }
+
+    // MARK: - UI Preferences Persistence
+
+    func saveUIPreferences() {
+        UserDefaults.standard.set(uiShowAgentsPanel, forKey: "uiShowAgentsPanel")
+        UserDefaults.standard.set(uiShowToolFeed, forKey: "uiShowToolFeed")
+        UserDefaults.standard.set(uiSubAgentStyle.rawValue, forKey: "uiSubAgentStyle")
+    }
+}
+
+// MARK: - Supporting Types (shared across UI)
+
+struct DisplayMessage: Identifiable, Equatable {
+    let id: UUID
+    let role: MessageRole
+    var content: String
+    let timestamp: Date
+    var badge: String?
+    var toolCalls: [ToolCallInfo]
+
+    init(role: MessageRole, content: String, badge: String? = nil) {
+        self.id        = UUID()
+        self.role      = role
+        self.content   = content
+        self.timestamp = Date()
+        self.badge     = badge
+        self.toolCalls = []
+    }
+
+    enum MessageRole { case user, assistant, system }
+}
+
+struct ToolCallInfo: Identifiable, Equatable {
+    let id: String   // call ID from bridge
+    let name: String
+    let input: String    // JSON summary
+    var output: String?
+    var isError: Bool
+    var isRunning: Bool
+}
+
+struct ToolActivityItem: Identifiable {
+    let id = UUID()
+    let callId: String
+    let toolName: String
+    let sessionKey: String
+    let input: [String: Any]
+    var output: String?
+    var isError: Bool
+    var isRunning: Bool
+    let startedAt: Date
+
+    static func == (lhs: ToolActivityItem, rhs: ToolActivityItem) -> Bool {
+        lhs.id == rhs.id
+    }
+}
+
+struct SubAgentDisplayInfo: Identifiable {
+    let id: String        // sessionKey
+    let taskId: String?
+    let parentKey: String?
+    let depth: Int
+    let costAccrued: Double
+    let costBudget: Double
+}
+
+enum SubAgentDisplayStyle: String, CaseIterable {
+    case inline  = "inline"
+    case panel   = "panel"
+    case tree    = "tree"
+
+    var label: String {
+        switch self {
+        case .inline: return "Inline in Chat"
+        case .panel:  return "Side Panel"
+        case .tree:   return "Tree View"
         }
     }
 }

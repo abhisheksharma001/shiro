@@ -149,6 +149,9 @@ final class AgentCoordinator: ObservableObject {
     }
 
     private func handleBridgeEvent(_ event: BridgeEvent) {
+        // Push tool events to the UI feed (AppState) — updates Tool Feed panel + inline chips.
+        Task { @MainActor in AppState.shared.handleBridgeEventForUI(event) }
+
         switch event {
 
         case .sessionReady(_, _):
@@ -164,6 +167,7 @@ final class AgentCoordinator: ObservableObject {
         case .toolStarted(_, _, let name, _):
             isRunning = true
             onStatusUpdate?("Using \(name)…")
+            Task { @MainActor in AppState.shared.agentStatus = .acting(tool: name) }
 
         case .toolFinished:
             break
