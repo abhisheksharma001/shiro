@@ -123,7 +123,12 @@ final class HooksEngine: ObservableObject {
             Task { @MainActor [weak self] in self?.rearmAllDailySchedules(reason: "foreground") }
         }
 
-        print("[HooksEngine] started \(hooks.filter(\.enabled).count)/\(hooks.count) hooks")
+        let enabled  = hooks.filter { $0.enabled }
+        let disabled = hooks.filter { !$0.enabled }
+        print("[HooksEngine] \(enabled.count) hook(s) active: \(enabled.map(\.name).joined(separator: ", "))")
+        if !disabled.isEmpty {
+            print("[HooksEngine] \(disabled.count) hook(s) disabled (enable in ~/.shiro/hooks.json): \(disabled.map(\.name).joined(separator: ", "))")
+        }
     }
 
     func stop() {

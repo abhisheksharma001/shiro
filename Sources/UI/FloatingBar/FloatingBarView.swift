@@ -603,12 +603,21 @@ private struct StatusTab: View {
     var body: some View {
         Form {
             Section("LLM Backend") {
-                LabeledContent("Mode", value: Config.anthropicEnabled ? "☁️ Anthropic API" : "🖥 LM Studio (local)")
-                LabeledContent("LM Studio", value: appState.lmStudioConnected ? "✅ Connected" : "❌ Disconnected")
-                LabeledContent("Brain model",      value: Config.brainModel)
-                LabeledContent("Fast model",       value: Config.fastModel)
-                LabeledContent("Vision model",     value: Config.visionModel)
-                LabeledContent("Embedding model",  value: Config.embeddingModel)
+                LabeledContent("Active route", value: appState.activeRouteMode.displayName)
+                LabeledContent("Bridge running", value: (appState.bridgeRouter?.isRunning ?? false) ? "✅ Yes" : "❌ No")
+                switch appState.activeRouteMode {
+                case .claudeCode:
+                    LabeledContent("Claude CLI", value: Config.claudeCodeCLIAvailable ? "✅ Found" : "❌ Missing")
+                    LabeledContent("PC access", value: Config.allowedDirectories.first ?? "~")
+                case .anthropic:
+                    LabeledContent("API key", value: Config.anthropicEnabled ? "✅ Set" : "❌ Missing (add in API Keys tab)")
+                case .lmStudio:
+                    LabeledContent("LM Studio", value: appState.lmStudioConnected ? "✅ Connected" : "❌ Disconnected — start LM Studio")
+                    LabeledContent("Brain model",     value: Config.brainModel)
+                    LabeledContent("Fast model",      value: Config.fastModel)
+                    LabeledContent("Vision model",    value: Config.visionModel)
+                    LabeledContent("Embed model",     value: Config.embeddingModel)
+                }
             }
             Section("Services") {
                 LabeledContent("Deepgram STT",  value: Config.deepgramEnabled  ? "✅ Active" : "⚪ Whisper fallback")

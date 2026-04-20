@@ -49,12 +49,19 @@ final class AppState: ObservableObject {
             let db = try ShiroDatabase()
             self.database = db
 
-            // 2. LM Studio client
+            // 2. LM Studio client — only probe when actually needed.
+            // In claudeCode mode the model calls go through the CLI, so we
+            // skip the health check (avoids nw_socket spam when LM Studio is off).
             let lm = LMStudioClient()
             self.lmStudio = lm
-            self.lmStudioConnected = await lm.healthCheck()
-            if lmStudioConnected {
-                self.activeModels = await lm.loadedModels()
+            let needsLMStudio = Config.routeMode != .claudeCode
+            if needsLMStudio {
+                self.lmStudioConnected = await lm.healthCheck()
+                if lmStudioConnected {
+                    self.activeModels = await lm.loadedModels()
+                }
+            } else {
+                print("[Shiro] ℹ️  LM Studio check skipped (Claude Code CLI route active)")
             }
 
             // 3. Knowledge graph
@@ -150,15 +157,22 @@ final class AppState: ObservableObject {
             let ing = Ingestor(store: store, database: db)
             self.ingestor = ing
 
-            // Background auto-ingest: index ~/Projects on first launch, then periodically.
-            Task.detached(priority: .background) {
-                let projectsDir = (NSHomeDirectory() as NSString).appendingPathComponent("Projects")
-                do {
-                    try await ing.ingestDirectory(projectsDir)
-                    print("[Shiro] ✅ Initial ingest of ~/Projects complete")
-                } catch {
-                    print("[Shiro] ⚠️  Ingest error: \(error.localizedDescription)")
+            // Background auto-ingest: index ~/Projects for semantic search.
+            // Only runs when LM Studio is reachable (embeddings require it).
+            // In claudeCode-only mode, skip silently — CLI has its own file tools.
+            if lmStudioConnected {
+                Task.detached(priority: .background) {
+                    let projectsDir = (NSHomeDirectory() as NSString)
+                        .appendingPathComponent("Projects")
+                    do {
+                        try await ing.ingestDirectory(projectsDir)
+                        print("[Shiro] ✅ Initial ingest of ~/Projects complete")
+                    } catch {
+                        print("[Shiro] ⚠️  Ingest error: \(error.localizedDescription)")
+                    }
                 }
+            } else {
+                print("[Shiro] ℹ️  Ingest skipped — LM Studio offline (embeddings unavailable)")
             }
 
             // Start hooks engine — all dependencies now available
