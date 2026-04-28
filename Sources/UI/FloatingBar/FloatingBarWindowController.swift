@@ -1,17 +1,33 @@
 import AppKit
 import SwiftUI
+import Combine
 
 // MARK: - Floating Bar Window
 // Compact pill anchored to top-center of screen.
-// Auto-resizes via NSHostingController.sizingOptions = .preferredContentSize
-// so the SwiftUI layout drives the window height without any manual frame math.
+//
+// Sizing strategy: MANUAL.
+// We deliberately do NOT use NSHostingController.sizingOptions = .preferredContentSize
+// because that creates an Auto Layout feedback loop with the inner ScrollView once
+// the chat thread grows — NSISEngine recurses through HostingScrollView.setFrameSize
+// until the main-thread stack overflows (we crashed on this 2026-04-21 18:50, 19:19).
+//
+// Instead we expose AppState.isFloatingExpanded as a single source of truth, observe
+// it via Combine, and animate the NSPanel frame between two fixed heights.
 
 final class FloatingBarWindowController: NSWindowController {
+
+    private static let barWidth:        CGFloat = 720
+    private static let compactHeight:   CGFloat = 64
+    private static let expandedHeight:  CGFloat = 540
+    private static let topMargin:       CGFloat = 12
+
+    private var cancellables = Set<AnyCancellable>()
 
     convenience init() {
         let window = FloatingBarWindow()
         self.init(window: window)
         setupWindow()
+        observeExpansion()
     }
 
     private func setupWindow() {
@@ -20,26 +36,58 @@ final class FloatingBarWindowController: NSWindowController {
         let contentView = FloatingBarView()
             .environmentObject(AppState.shared)
 
+        // Fixed-size hosting controller — no automatic resizing. The SwiftUI
+        // root view always reports the SAME intrinsic size for a given window
+        // size, so AutoLayout stays stable.
         let hosting = NSHostingController(rootView: contentView)
-        if #available(macOS 13, *) {
-            hosting.sizingOptions = .preferredContentSize
-        }
-
         window.contentViewController = hosting
 
-        // Width is fixed; height expands as SwiftUI content grows.
-        window.minSize = NSSize(width: 700, height: 60)
-        window.maxSize = NSSize(width: 700, height: 760)
+        // Hard bounds — give Auto Layout no room to oscillate.
+        window.minSize = NSSize(width: Self.barWidth, height: Self.compactHeight)
+        window.maxSize = NSSize(width: Self.barWidth, height: Self.expandedHeight)
 
-        positionAtTopCenter(window: window, width: 700, compactHeight: 60)
+        positionAtTop(window: window, height: Self.compactHeight)
     }
 
-    private func positionAtTopCenter(window: NSWindow, width: CGFloat, compactHeight: CGFloat) {
-        guard let screen = NSScreen.main else { return }
-        let sf = screen.visibleFrame
-        let x  = sf.midX - width / 2
-        let y  = sf.maxY - compactHeight - 12
-        window.setFrame(CGRect(x: x, y: y, width: width, height: compactHeight), display: false)
+    private func observeExpansion() {
+        AppState.shared.$isFloatingExpanded
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] expanded in
+                self?.applyExpansion(expanded)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func applyExpansion(_ expanded: Bool) {
+        guard let window else { return }
+        let height = expanded ? Self.expandedHeight : Self.compactHeight
+        positionAtTop(window: window, height: height, animated: true)
+    }
+
+    /// Re-anchor the window so its top edge sits `topMargin` below the menu bar
+    /// of whichever screen the cursor is on. Keeps the bar visually pinned even
+    /// as the height changes.
+    private func positionAtTop(window: NSWindow, height: CGFloat, animated: Bool = false) {
+        let screen = screenForCursor() ?? NSScreen.main
+        guard let sf = screen?.visibleFrame else { return }
+        let x = sf.midX - Self.barWidth / 2
+        let y = sf.maxY - height - Self.topMargin
+        let frame = CGRect(x: x, y: y, width: Self.barWidth, height: height)
+        if animated {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration              = 0.22
+                ctx.allowsImplicitAnimation = true
+                window.animator().setFrame(frame, display: true)
+            }
+        } else {
+            window.setFrame(frame, display: false)
+        }
+    }
+
+    private func screenForCursor() -> NSScreen? {
+        let p = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(p) }
     }
 }
 

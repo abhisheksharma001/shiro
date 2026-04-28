@@ -920,6 +920,12 @@ final class ACPBridge: BridgeRouter {
         if let k = Config.openAIAPIKey, !k.isEmpty { env["OPENAI_API_KEY"] = k }
         if let u = Config.openAIBaseURL, !u.isEmpty { env["OPENAI_BASE_URL"] = u }
 
+        // MCP integration credentials — read from Keychain and forwarded to
+        // child MCP servers (composio, github, huggingface) via env vars.
+        if let k = KeychainHelper.get(.composioAPIKey),    !k.isEmpty { env["COMPOSIO_API_KEY"]              = k }
+        if let k = KeychainHelper.get(.githubToken),       !k.isEmpty { env["GITHUB_PERSONAL_ACCESS_TOKEN"]  = k }
+        if let k = KeychainHelper.get(.huggingFaceToken),  !k.isEmpty { env["HF_TOKEN"]                      = k }
+
         return env
     }
 }

@@ -60,7 +60,7 @@ struct ShiroMainWindowView: View {
 
             // ── Main content ──────────────────────────────────────────
             ZStack {
-                Color(hex: "#07090F").ignoresSafeArea()
+                Color.vBg.ignoresSafeArea()
 
                 switch activeSection {
                 case .chat:
@@ -78,7 +78,7 @@ struct ShiroMainWindowView: View {
                 }
             }
         }
-        .background(Color(hex: "#07090F"))
+        .background(Color.vBg)
         .task { await appState.refreshSubAgentSessions() }
         // Periodic sub-agent poll while window is open
         .task {
@@ -100,31 +100,31 @@ private struct LeftSidebar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Logo / title area
-            HStack(spacing: 10) {
-                ZStack {
-                    Circle().fill(Color(hex: "#6C63FF").opacity(0.18)).frame(width: 30, height: 30)
-                    Image(systemName: "waveform.circle.fill")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundColor(Color(hex: "#6C63FF"))
-                }
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("SHIRO").font(.custom("JetBrains Mono", size: 13)).fontWeight(.bold)
-                        .foregroundColor(Color(hex: "#DEE4FF"))
-                        .tracking(2)
-                    Text(routeLabel).font(.custom("JetBrains Mono", size: 9.5))
+            // Wordmark — editorial serif, copper accent dot
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Circle()
+                    .fill(Color.vAccent)
+                    .frame(width: 8, height: 8)
+                    .offset(y: -2)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Shiro")
+                        .font(ShiroFont.serif(size: 22, weight: .semibold))
+                        .foregroundColor(Color.vText)
+                    Text(routeLabel.uppercased())
+                        .font(ShiroFont.mono(size: 9))
+                        .tracking(1.4)
                         .foregroundColor(routeColor)
                 }
                 Spacer()
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 20)
-            .padding(.bottom, 16)
+            .padding(.horizontal, 18)
+            .padding(.top, 22)
+            .padding(.bottom, 18)
 
             // Status orb row
             statusRow
-                .padding(.horizontal, 14)
-                .padding(.bottom, 16)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 18)
 
             sidebarDivider
 
@@ -139,45 +139,51 @@ private struct LeftSidebar: View {
                     ) { active = section }
                 }
             }
-            .padding(.horizontal, 8)
-            .padding(.top, 12)
+            .padding(.horizontal, 10)
+            .padding(.top, 14)
 
-            sidebarDivider.padding(.top, 12)
+            sidebarDivider.padding(.top, 14)
 
             // Quick toggles
             VStack(alignment: .leading, spacing: 4) {
-                Text("QUICK CONTROLS")
-                    .font(.custom("JetBrains Mono", size: 9))
-                    .foregroundColor(Color(hex: "#363850"))
-                    .tracking(1.5)
-                    .padding(.horizontal, 8)
-                    .padding(.top, 12)
-                    .padding(.bottom, 4)
+                Text("CONTROLS")
+                    .font(ShiroFont.mono(size: 9))
+                    .foregroundColor(Color.vDim)
+                    .tracking(1.6)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 14)
+                    .padding(.bottom, 6)
 
                 SidebarToggle(icon: "mic.fill", label: "Mic",
-                              isOn: appState.isListening, activeColor: Color(hex: "#10D9A4")) {
-                    // delegate to floating bar toggle logic
+                              isOn: appState.isListening, activeColor: Color.vActive) {
+                    appState.toggleListening()
                 }
 
                 SidebarToggle(icon: "waveform.circle.fill", label: "Meeting Mode",
-                              isOn: appState.isMeetingMode, activeColor: Color(hex: "#F0A030")) {
+                              isOn: appState.isMeetingMode, activeColor: Color.vAmber) {
                     Task { @MainActor in appState.isMeetingMode.toggle() }
                 }
 
                 SidebarToggle(icon: "eye.fill", label: "Browser Control",
-                              isOn: appState.browserControlEnabled, activeColor: Color(hex: "#6C63FF")) {
+                              isOn: appState.browserControlEnabled, activeColor: Color.vAccent) {
                     appState.setBrowserControl(!appState.browserControlEnabled)
                 }
 
                 SidebarToggle(icon: "rectangle.3.group", label: "Agents Panel",
-                              isOn: appState.uiShowAgentsPanel, activeColor: Color(hex: "#6C63FF")) {
+                              isOn: appState.uiShowAgentsPanel, activeColor: Color.vAccent) {
                     appState.uiShowAgentsPanel.toggle()
                     appState.saveUIPreferences()
                 }
 
                 SidebarToggle(icon: "list.bullet.rectangle", label: "Tool Feed",
-                              isOn: appState.uiShowToolFeed, activeColor: Color(hex: "#6C63FF")) {
+                              isOn: appState.uiShowToolFeed, activeColor: Color.vAccent) {
                     appState.uiShowToolFeed.toggle()
+                    appState.saveUIPreferences()
+                }
+
+                SidebarToggle(icon: "chart.line.uptrend.xyaxis", label: "Forecast Mode",
+                              isOn: appState.forecastModeEnabled, activeColor: Color.vActive) {
+                    appState.forecastModeEnabled.toggle()
                     appState.saveUIPreferences()
                 }
             }
@@ -189,25 +195,8 @@ private struct LeftSidebar: View {
             VStack(spacing: 8) {
                 sidebarDivider
 
-                Button {
-                    appState.clearConversation()
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "plus.circle")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(Color(hex: "#6C63FF"))
-                        Text("New Chat")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(Color(hex: "#DEE4FF"))
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(Color(hex: "#6C63FF").opacity(0.1))
-                    .cornerRadius(8)
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 8)
+                NewChatButton()
+                    .padding(.horizontal, 8)
 
                 bridgeStatusRow
                     .padding(.horizontal, 14)
@@ -215,10 +204,10 @@ private struct LeftSidebar: View {
             }
         }
         .frame(width: sidebarWidth)
-        .background(Color(hex: "#0B0D15"))
+        .background(Color.vSidebar)
         .overlay(
             Rectangle()
-                .fill(Color(hex: "#1D2235"))
+                .fill(Color.vBorder)
                 .frame(width: 1),
             alignment: .trailing
         )
@@ -226,7 +215,7 @@ private struct LeftSidebar: View {
 
     private var sidebarDivider: some View {
         Rectangle()
-            .fill(Color(hex: "#1D2235"))
+            .fill(Color.vBorder)
             .frame(height: 1)
             .padding(.horizontal, 0)
     }
@@ -241,21 +230,21 @@ private struct LeftSidebar: View {
 
     private var routeColor: Color {
         switch appState.bridgeStatus {
-        case .running:     return Color(hex: "#10D9A4")
-        case .offline:     return Color(hex: "#EF4444")
-        default:           return Color(hex: "#F0A030")
+        case .running:     return Color.vActive
+        case .offline:     return Color.vRed
+        default:           return Color.vAmber
         }
     }
 
     private var statusRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 9) {
             ZStack {
                 if appState.isProcessing {
                     Circle()
-                        .fill(orbColor.opacity(0.25))
+                        .fill(orbColor.opacity(0.22))
                         .frame(width: 22, height: 22)
                         .scaleEffect(1.4)
-                        .animation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true),
+                        .animation(.easeInOut(duration: 0.95).repeatForever(autoreverses: true),
                                    value: appState.isProcessing)
                 }
                 Circle().fill(orbColor).frame(width: 8, height: 8)
@@ -263,32 +252,33 @@ private struct LeftSidebar: View {
             .frame(width: 22, height: 22)
 
             Text(appState.agentStatus.label)
-                .font(.custom("JetBrains Mono", size: 10.5))
-                .foregroundColor(Color(hex: "#5A6080"))
+                .font(ShiroFont.ui(size: 11, weight: .medium))
+                .foregroundColor(Color.vMuted)
                 .lineLimit(1)
         }
     }
 
     private var orbColor: Color {
         switch appState.agentStatus {
-        case .idle:      return Color(hex: "#363850")
-        case .listening: return Color(hex: "#10D9A4")
-        case .thinking:  return Color(hex: "#6C63FF")
-        case .acting:    return Color(hex: "#F0A030")
-        case .speaking:  return Color(hex: "#10D9A4")
-        case .error:     return Color(hex: "#EF4444")
+        case .idle:      return Color.vDim
+        case .listening: return Color.vActive
+        case .thinking:  return Color.vAccent
+        case .acting:    return Color.vAmber
+        case .speaking:  return Color.vActive
+        case .error:     return Color.vRed
         }
     }
 
     private var bridgeStatusRow: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 7) {
             Circle()
                 .fill(routeColor)
                 .frame(width: 6, height: 6)
             Text(bridgeStatusLabel)
-                .font(.custom("JetBrains Mono", size: 9.5))
-                .foregroundColor(Color(hex: "#363850"))
+                .font(ShiroFont.mono(size: 9.5))
+                .foregroundColor(Color.vDim)
                 .lineLimit(1)
+                .truncationMode(.tail)
         }
     }
 
@@ -321,36 +311,53 @@ private struct SidebarNavItem: View {
     let badge:    String?
     let action:   () -> Void
 
+    @State private var hovering = false
+
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 10) {
+            HStack(spacing: 11) {
                 Image(systemName: icon)
                     .font(.system(size: 13, weight: isActive ? .semibold : .regular))
-                    .foregroundColor(isActive ? Color(hex: "#6C63FF") : Color(hex: "#5A6080"))
+                    .foregroundColor(isActive ? Color.vAccent : Color.vMuted)
                     .frame(width: 18)
 
                 Text(label)
-                    .font(.system(size: 13, weight: isActive ? .semibold : .regular))
-                    .foregroundColor(isActive ? Color(hex: "#DEE4FF") : Color(hex: "#5A6080"))
+                    .font(ShiroFont.ui(size: 13, weight: isActive ? .semibold : .regular))
+                    .foregroundColor(isActive ? Color.vText : Color.vMuted)
 
                 Spacer()
 
                 if let badge {
                     Text(badge)
-                        .font(.custom("JetBrains Mono", size: 9))
-                        .foregroundColor(.black)
+                        .font(ShiroFont.mono(size: 9, weight: .semibold))
+                        .foregroundColor(Color(hex: "#1A1916"))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Color(hex: "#6C63FF"))
+                        .background(Color.vAccent)
                         .clipShape(Capsule())
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(isActive ? Color(hex: "#6C63FF").opacity(0.12) : Color.clear)
-            .cornerRadius(8)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .background(
+                ZStack {
+                    if isActive {
+                        Color.vAccent.opacity(0.10)
+                    } else if hovering {
+                        Color.vElev.opacity(0.6)
+                    }
+                }
+            )
+            .overlay(alignment: .leading) {
+                if isActive {
+                    Rectangle().fill(Color.vAccent).frame(width: 2)
+                }
+            }
+            .cornerRadius(7)
         }
         .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
 
@@ -363,25 +370,116 @@ private struct SidebarToggle: View {
     let activeColor: Color
     let action:      () -> Void
 
+    @State private var hovering = false
+
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 10) {
+            HStack(spacing: 11) {
                 Image(systemName: icon)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isOn ? activeColor : Color(hex: "#363850"))
+                    .foregroundColor(isOn ? activeColor : Color.vDim)
                     .frame(width: 18)
                 Text(label)
-                    .font(.system(size: 12))
-                    .foregroundColor(isOn ? Color(hex: "#DEE4FF") : Color(hex: "#363850"))
+                    .font(ShiroFont.ui(size: 12, weight: isOn ? .medium : .regular))
+                    .foregroundColor(isOn ? Color.vText : Color.vMuted)
                 Spacer()
-                Circle()
-                    .fill(isOn ? activeColor : Color(hex: "#1D2235"))
-                    .frame(width: 7, height: 7)
+                // Pill switch — softer than a single dot
+                Capsule()
+                    .fill(isOn ? activeColor.opacity(0.85) : Color.vBorder)
+                    .frame(width: 22, height: 12)
+                    .overlay(alignment: isOn ? .trailing : .leading) {
+                        Circle()
+                            .fill(Color.vText)
+                            .frame(width: 8, height: 8)
+                            .padding(.horizontal, 2)
+                    }
+                    .animation(.spring(response: 0.25, dampingFraction: 0.85), value: isOn)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .background(hovering ? Color.vElev.opacity(0.5) : Color.clear)
+            .cornerRadius(6)
         }
         .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+// MARK: - Chip Button (warm, hover-aware)
+
+private struct ChipButton: View {
+    let label: String
+    let icon: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(hovering ? Color.vAccent : Color.vMuted)
+                Text(label)
+                    .font(ShiroFont.ui(size: 12.5, weight: .medium))
+                    .foregroundColor(Color.vText)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(hovering ? Color.vElev : Color.vSurface)
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(hovering ? Color.vAccent.opacity(0.45) : Color.vBorder, lineWidth: 0.8)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.14), value: hovering)
+    }
+}
+
+// MARK: - New Chat Button (with brief "cleared" confirmation)
+
+private struct NewChatButton: View {
+    @EnvironmentObject var appState: AppState
+    @State private var justCleared = false
+
+    var body: some View {
+        Button(action: tap) {
+            HStack(spacing: 8) {
+                Image(systemName: justCleared ? "checkmark.circle.fill" : "plus.circle")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(justCleared ? Color.vActive : Color.vAccent)
+                Text(justCleared ? "Cleared" : "New Chat")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Color.vText)
+                Spacer()
+                Text("⌘N")
+                    .font(.custom("JetBrains Mono", size: 9.5))
+                    .foregroundColor(Color.vDim)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                (justCleared ? Color.vActive : Color.vAccent)
+                    .opacity(justCleared ? 0.18 : 0.10)
+            )
+            .cornerRadius(8)
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut("n", modifiers: [.command])
+        .help("Clear conversation and start fresh (⌘N)")
+        .animation(.easeInOut(duration: 0.2), value: justCleared)
+    }
+
+    private func tap() {
+        appState.clearConversation()
+        justCleared = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            justCleared = false
+        }
     }
 }
 
@@ -408,7 +506,7 @@ struct ChatWorkspace: View {
                 // Brain status bar
                 brainStatusBar
 
-                Divider().background(Color(hex: "#1D2235"))
+                Divider().background(Color.vBorder)
 
                 // Message thread
                 ScrollViewReader { proxy in
@@ -440,16 +538,16 @@ struct ChatWorkspace: View {
                     }
                 }
 
-                Divider().background(Color(hex: "#1D2235"))
+                Divider().background(Color.vBorder)
 
                 // Input bar
                 chatInputBar
             }
-            .background(Color(hex: "#07090F"))
+            .background(Color.vBg)
 
             // ── Right panel (agents / tool feed) ──────────────────
             if showRightPanel {
-                Divider().background(Color(hex: "#1D2235"))
+                Divider().background(Color.vBorder)
 
                 VStack(spacing: 0) {
                     // Panel picker
@@ -462,9 +560,9 @@ struct ChatWorkspace: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(Color(hex: "#0B0D15"))
+                    .background(Color.vSidebar)
 
-                    Divider().background(Color(hex: "#1D2235"))
+                    Divider().background(Color.vBorder)
 
                     switch rightPanel {
                     case .agents:
@@ -474,7 +572,7 @@ struct ChatWorkspace: View {
                     }
                 }
                 .frame(width: 280)
-                .background(Color(hex: "#0B0D15"))
+                .background(Color.vSidebar)
             }
         }
     }
@@ -482,36 +580,43 @@ struct ChatWorkspace: View {
     // MARK: Brain status bar
 
     private var brainStatusBar: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 14) {
             // State
-            HStack(spacing: 6) {
+            HStack(spacing: 7) {
                 Circle()
                     .fill(stateColor)
                     .frame(width: 7, height: 7)
-                    .opacity(appState.isProcessing ? 1 : 0.5)
-                    .scaleEffect(appState.isProcessing ? 1.2 : 1.0)
-                    .animation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true),
+                    .opacity(appState.isProcessing ? 1 : 0.55)
+                    .scaleEffect(appState.isProcessing ? 1.25 : 1.0)
+                    .animation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true),
                                value: appState.isProcessing)
                 Text(appState.agentStatus.label)
-                    .font(.custom("JetBrains Mono", size: 11))
-                    .foregroundColor(Color(hex: "#5A6080"))
+                    .font(ShiroFont.ui(size: 11.5, weight: .medium))
+                    .foregroundColor(Color.vMuted)
+            }
+
+            // Forecast mode badge
+            if appState.forecastModeEnabled {
+                statusPill(icon: "chart.line.uptrend.xyaxis",
+                           label: "FORECAST",
+                           color: Color.vActive)
             }
 
             Spacer()
 
             // Active sub-agent count
             if !appState.subAgentSessions.isEmpty {
-                HStack(spacing: 5) {
+                HStack(spacing: 6) {
                     Image(systemName: "cpu")
                         .font(.system(size: 10))
-                        .foregroundColor(Color(hex: "#6C63FF"))
+                        .foregroundColor(Color.vAccent)
                     Text("\(appState.subAgentSessions.count) agent\(appState.subAgentSessions.count == 1 ? "" : "s")")
-                        .font(.custom("JetBrains Mono", size: 10.5))
-                        .foregroundColor(Color(hex: "#6C63FF"))
+                        .font(ShiroFont.mono(size: 10.5))
+                        .foregroundColor(Color.vAccent)
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 9)
                 .padding(.vertical, 3)
-                .background(Color(hex: "#6C63FF").opacity(0.1))
+                .background(Color.vAccent.opacity(0.12))
                 .clipShape(Capsule())
             }
 
@@ -530,10 +635,10 @@ struct ChatWorkspace: View {
                         Text("Stop")
                             .font(.system(size: 11, weight: .medium))
                     }
-                    .foregroundColor(Color(hex: "#EF4444"))
+                    .foregroundColor(Color.vRed)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
-                    .background(Color(hex: "#EF4444").opacity(0.1))
+                    .background(Color.vRed.opacity(0.1))
                     .cornerRadius(6)
                 }
                 .buttonStyle(.plain)
@@ -541,45 +646,68 @@ struct ChatWorkspace: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
-        .background(Color(hex: "#0B0D15"))
+        .background(Color.vSidebar)
     }
 
     private var stateColor: Color {
         switch appState.agentStatus {
-        case .idle:      return Color(hex: "#363850")
-        case .listening: return Color(hex: "#10D9A4")
-        case .thinking:  return Color(hex: "#6C63FF")
-        case .acting:    return Color(hex: "#F0A030")
-        case .speaking:  return Color(hex: "#10D9A4")
-        case .error:     return Color(hex: "#EF4444")
+        case .idle:      return Color.vDim
+        case .listening: return Color.vActive
+        case .thinking:  return Color.vAccent
+        case .acting:    return Color.vAmber
+        case .speaking:  return Color.vActive
+        case .error:     return Color.vRed
         }
     }
 
-    // MARK: Empty state
+    /// Reusable mini status pill (icon + tracking-1 label, warm tinted bg).
+    private func statusPill(icon: String, label: String, color: Color) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 9, weight: .medium))
+            Text(label)
+                .font(ShiroFont.mono(size: 9, weight: .medium))
+                .tracking(1.1)
+        }
+        .foregroundColor(color)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(color.opacity(0.12))
+        .clipShape(Capsule())
+    }
+
+    // MARK: Empty state — editorial, generous whitespace
 
     private var emptyStateView: some View {
-        VStack(spacing: 24) {
-            Spacer().frame(height: 60)
-            ZStack {
-                Circle()
-                    .fill(Color(hex: "#6C63FF").opacity(0.08))
-                    .frame(width: 80, height: 80)
-                Image(systemName: "waveform.circle")
-                    .font(.system(size: 36, weight: .light))
-                    .foregroundColor(Color(hex: "#6C63FF").opacity(0.5))
-            }
-            VStack(spacing: 8) {
-                Text("Shiro is ready")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(Color(hex: "#DEE4FF"))
-                Text("Type a message or use a skill with /skill-name")
-                    .font(.system(size: 13))
-                    .foregroundColor(Color(hex: "#5A6080"))
+        VStack(spacing: 28) {
+            Spacer().frame(height: 80)
+            // No big circle/icon — just typography. Editorial restraint.
+            VStack(alignment: .center, spacing: 14) {
+                Text("Hi, I'm Shiro.")
+                    .font(ShiroFont.serif(size: 36, weight: .regular))
+                    .foregroundColor(Color.vText)
+                Text("Ask me anything — or invoke a skill with /forecast, /research, /ingest.")
+                    .font(ShiroFont.ui(size: 14))
+                    .foregroundColor(Color.vMuted)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 480)
             }
             // Quick actions
             HStack(spacing: 12) {
-                quickActionChip(label: "Daily brief", icon: "sun.horizon") {
-                    inputText = "/daily-brief"; sendMessage()
+                if appState.forecastModeEnabled {
+                    quickActionChip(label: "Forecast AAPL", icon: "chart.line.uptrend.xyaxis") {
+                        inputText = "/forecast AAPL"; sendMessage()
+                    }
+                    quickActionChip(label: "Forecast BTC", icon: "bitcoinsign.circle") {
+                        inputText = "/forecast BTC-USD"; sendMessage()
+                    }
+                } else {
+                    quickActionChip(label: "Daily brief", icon: "sun.horizon") {
+                        inputText = "/daily-brief"; sendMessage()
+                    }
+                    quickActionChip(label: "Research", icon: "sparkles.rectangle.stack") {
+                        inputText = "/research "; inputFocused = true
+                    }
                 }
                 quickActionChip(label: "Search memory", icon: "magnifyingglass") {
                     inputText = "Search my memory for: "
@@ -595,24 +723,7 @@ struct ChatWorkspace: View {
     }
 
     private func quickActionChip(label: String, icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.system(size: 11))
-                Text(label)
-                    .font(.system(size: 12))
-            }
-            .foregroundColor(Color(hex: "#DEE4FF"))
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(Color(hex: "#151A26"))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(Color(hex: "#1D2235"), lineWidth: 1)
-            )
-            .cornerRadius(8)
-        }
-        .buttonStyle(.plain)
+        ChipButton(label: label, icon: icon, action: action)
     }
 
     // MARK: Chat input bar
@@ -623,21 +734,21 @@ struct ChatWorkspace: View {
             ZStack(alignment: .topLeading) {
                 if inputText.isEmpty {
                     Text(placeholder)
-                        .font(.system(size: 13))
-                        .foregroundColor(Color(hex: "#363850"))
-                        .padding(.top, 12)
-                        .padding(.leading, 14)
+                        .font(ShiroFont.ui(size: 13.5))
+                        .foregroundColor(Color.vDim)
+                        .padding(.top, 13)
+                        .padding(.leading, 15)
                         .allowsHitTesting(false)
                 }
                 TextEditor(text: $inputText)
-                    .font(.system(size: 13))
-                    .foregroundColor(Color(hex: "#DEE4FF"))
+                    .font(ShiroFont.ui(size: 13.5))
+                    .foregroundColor(Color.vText)
                     .scrollContentBackground(.hidden)
                     .background(Color.clear)
                     .focused($inputFocused)
-                    .frame(minHeight: 44, maxHeight: 160)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
+                    .frame(minHeight: 46, maxHeight: 160)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 9)
                     .onKeyPress(.return) {
                         if NSEvent.modifierFlags.contains(.shift) {
                             return .ignored  // shift+enter = newline
@@ -646,15 +757,18 @@ struct ChatWorkspace: View {
                         return .handled
                     }
             }
-            .background(Color(hex: "#0F1218"))
+            .background(Color.vSurface)
             .overlay(
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
                     .strokeBorder(
-                        inputFocused ? Color(hex: "#6C63FF").opacity(0.5) : Color(hex: "#1D2235"),
-                        lineWidth: 1
+                        inputFocused ? Color.vAccent.opacity(0.55) : Color.vBorder,
+                        lineWidth: inputFocused ? 1.2 : 0.8
                     )
             )
-            .cornerRadius(12)
+            .shadow(color: inputFocused ? Color.vAccent.opacity(0.12) : .clear,
+                    radius: 12, y: 2)
+            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .animation(.easeOut(duration: 0.18), value: inputFocused)
 
             // Send / Stop
             VStack(spacing: 8) {
@@ -667,12 +781,12 @@ struct ChatWorkspace: View {
                 Button { /* toggle listening */ } label: {
                     Image(systemName: appState.isListening ? "mic.fill" : "mic")
                         .font(.system(size: 14))
-                        .foregroundColor(appState.isListening ? Color(hex: "#10D9A4") : Color(hex: "#5A6080"))
+                        .foregroundColor(appState.isListening ? Color.vActive : Color.vMuted)
                         .frame(width: 36, height: 36)
-                        .background(Color(hex: "#0F1218"))
+                        .background(Color.vSurface)
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
-                                .strokeBorder(Color(hex: "#1D2235"), lineWidth: 1)
+                                .strokeBorder(Color.vBorder, lineWidth: 1)
                         )
                         .cornerRadius(8)
                 }
@@ -681,20 +795,20 @@ struct ChatWorkspace: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
-        .background(Color(hex: "#0B0D15"))
+        .background(Color.vSidebar)
     }
 
     private var sendButton: some View {
         Button { sendMessage() } label: {
             Image(systemName: inputText.isEmpty ? "arrow.up" : "arrow.up.circle.fill")
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundColor(inputText.isEmpty ? Color(hex: "#363850") : Color(hex: "#6C63FF"))
+                .foregroundColor(inputText.isEmpty ? Color.vDim : Color.vAccent)
                 .frame(width: 36, height: 36)
-                .background(inputText.isEmpty ? Color(hex: "#0F1218") : Color(hex: "#6C63FF").opacity(0.15))
+                .background(inputText.isEmpty ? Color.vSurface : Color.vAccent.opacity(0.15))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
                         .strokeBorder(
-                            inputText.isEmpty ? Color(hex: "#1D2235") : Color(hex: "#6C63FF").opacity(0.4),
+                            inputText.isEmpty ? Color.vBorder : Color.vAccent.opacity(0.4),
                             lineWidth: 1
                         )
                 )
@@ -715,12 +829,12 @@ struct ChatWorkspace: View {
         } label: {
             Image(systemName: "stop.fill")
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(Color(hex: "#EF4444"))
+                .foregroundColor(Color.vRed)
                 .frame(width: 36, height: 36)
-                .background(Color(hex: "#EF4444").opacity(0.12))
+                .background(Color.vRed.opacity(0.12))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(Color(hex: "#EF4444").opacity(0.4), lineWidth: 1)
+                        .strokeBorder(Color.vRed.opacity(0.4), lineWidth: 1)
                 )
                 .cornerRadius(8)
         }
@@ -757,12 +871,12 @@ struct ChatWorkspace: View {
                     .font(.system(size: 11, weight: rightPanel == section ? .semibold : .regular))
             }
             .foregroundColor(
-                !available ? Color(hex: "#363850") :
-                rightPanel == section ? Color(hex: "#6C63FF") : Color(hex: "#5A6080")
+                !available ? Color.vDim :
+                rightPanel == section ? Color.vAccent : Color.vMuted
             )
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(rightPanel == section ? Color(hex: "#6C63FF").opacity(0.1) : Color.clear)
+            .background(rightPanel == section ? Color.vAccent.opacity(0.1) : Color.clear)
             .cornerRadius(6)
         }
         .buttonStyle(.plain)
@@ -844,50 +958,72 @@ private struct ChatMessageRow: View {
                 Spacer(minLength: 80)
                 VStack(alignment: .trailing, spacing: 5) {
                     Text(message.content)
-                        .font(.system(size: 13.5))
-                        .foregroundColor(Color(hex: "#07090F"))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .background(Color(hex: "#6C63FF"))
-                        .cornerRadius(16)
-                        .vCornerRadius(3, corners: .topRight)
+                        .font(ShiroFont.ui(size: 13.5))
+                        .foregroundColor(Color.vBg)
+                        .padding(.horizontal, 15)
+                        .padding(.vertical, 11)
+                        .background(Color.vAccent)
+                        .clipShape(
+                            UnevenRoundedRectangle(
+                                topLeadingRadius: 16, bottomLeadingRadius: 16,
+                                bottomTrailingRadius: 16, topTrailingRadius: 4,
+                                style: .continuous
+                            )
+                        )
 
                     if let badge = message.badge {
                         Text(badge)
-                            .font(.custom("JetBrains Mono", size: 9.5))
-                            .foregroundColor(Color(hex: "#6C63FF").opacity(0.7))
+                            .font(ShiroFont.mono(size: 9.5))
+                            .foregroundColor(Color.vAccent.opacity(0.75))
                     }
                 }
             } else if message.role == .assistant {
-                // Avatar
+                // Avatar — serif "S" mark, warm copper
                 ZStack {
                     Circle()
-                        .fill(Color(hex: "#6C63FF").opacity(0.12))
-                        .frame(width: 28, height: 28)
-                    Image(systemName: "waveform.circle")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(Color(hex: "#6C63FF"))
+                        .fill(Color.vAccent.opacity(0.14))
+                        .frame(width: 30, height: 30)
+                    Text("S")
+                        .font(ShiroFont.serif(size: 16, weight: .semibold))
+                        .foregroundColor(Color.vAccent)
                 }
                 .padding(.top, 2)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack(spacing: 8) {
                         Text("Shiro")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(Color(hex: "#6C63FF"))
+                            .font(ShiroFont.serif(size: 13, weight: .semibold))
+                            .foregroundColor(Color.vAccent)
                         Text(message.timestamp, style: .time)
-                            .font(.system(size: 10))
-                            .foregroundColor(Color(hex: "#363850"))
+                            .font(ShiroFont.mono(size: 9.5))
+                            .foregroundColor(Color.vDim)
                     }
 
-                    if message.content.isEmpty {
+                    if message.content.isEmpty && message.imageBase64 == nil {
                         TypingDots()
                     } else {
-                        Markdown(message.content)
-                            .markdownTheme(.shiroTheme)
-                            .font(.system(size: 13.5))
-                            .foregroundColor(Color(hex: "#DEE4FF"))
-                            .textSelection(.enabled)
+                        if !message.content.isEmpty {
+                            Markdown(message.content)
+                                .markdownTheme(.shiroTheme)
+                                .font(.system(size: 13.5))
+                                .foregroundColor(Color.vText)
+                                .textSelection(.enabled)
+                        }
+                        // Forecast / chart image
+                        if let b64 = message.imageBase64,
+                           let data = Data(base64Encoded: b64),
+                           let nsImg = NSImage(data: data) {
+                            Image(nsImage: nsImg)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxWidth: 520)
+                                .cornerRadius(10)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .strokeBorder(Color.vBorder, lineWidth: 1)
+                                )
+                                .padding(.top, 4)
+                        }
                     }
 
                     // Tool calls
@@ -919,15 +1055,15 @@ private struct ToolCallRow: View {
 
             Text(call.name)
                 .font(.custom("JetBrains Mono", size: 11))
-                .foregroundColor(Color(hex: "#DEE4FF"))
+                .foregroundColor(Color.vText)
 
             if let output = call.output, !output.isEmpty {
                 Text("→")
                     .font(.system(size: 10))
-                    .foregroundColor(Color(hex: "#363850"))
+                    .foregroundColor(Color.vDim)
                 Text(output.prefix(80))
                     .font(.custom("JetBrains Mono", size: 10.5))
-                    .foregroundColor(Color(hex: "#5A6080"))
+                    .foregroundColor(Color.vMuted)
                     .lineLimit(1)
             }
 
@@ -935,10 +1071,10 @@ private struct ToolCallRow: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        .background(Color(hex: "#0F1218"))
+        .background(Color.vSurface)
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(Color(hex: "#1D2235"), lineWidth: 0.8)
+                .strokeBorder(Color.vBorder, lineWidth: 0.8)
         )
         .cornerRadius(6)
     }
@@ -950,9 +1086,9 @@ private struct ToolCallRow: View {
     }
 
     private var statusColor: Color {
-        if call.isRunning { return Color(hex: "#F0A030") }
-        if call.isError   { return Color(hex: "#EF4444") }
-        return Color(hex: "#10D9A4")
+        if call.isRunning { return Color.vAmber }
+        if call.isError   { return Color.vRed }
+        return Color.vActive
     }
 }
 
@@ -967,12 +1103,12 @@ struct AgentsPanelView: View {
             HStack {
                 Text("SUB-AGENTS")
                     .font(.custom("JetBrains Mono", size: 9.5))
-                    .foregroundColor(Color(hex: "#363850"))
+                    .foregroundColor(Color.vDim)
                     .tracking(1.5)
                 Spacer()
                 Text("✓ \(appState.subAgentCompletedCount)  ✗ \(appState.subAgentFailedCount)")
                     .font(.custom("JetBrains Mono", size: 9.5))
-                    .foregroundColor(Color(hex: "#363850"))
+                    .foregroundColor(Color.vDim)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -982,10 +1118,10 @@ struct AgentsPanelView: View {
                     Spacer()
                     Image(systemName: "cpu")
                         .font(.system(size: 28))
-                        .foregroundColor(Color(hex: "#363850"))
+                        .foregroundColor(Color.vDim)
                     Text("No active sub-agents")
                         .font(.system(size: 12))
-                        .foregroundColor(Color(hex: "#363850"))
+                        .foregroundColor(Color.vDim)
                     Spacer()
                 }
                 .frame(maxWidth: .infinity)
@@ -1014,7 +1150,7 @@ private struct AgentSessionCard: View {
                 // Depth indicator
                 ForEach(0..<min(session.depth, 4), id: \.self) { _ in
                     Rectangle()
-                        .fill(Color(hex: "#6C63FF").opacity(0.4))
+                        .fill(Color.vAccent.opacity(0.4))
                         .frame(width: 2, height: 14)
                         .cornerRadius(1)
                 }
@@ -1022,11 +1158,11 @@ private struct AgentSessionCard: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(session.id.prefix(16))
                         .font(.custom("JetBrains Mono", size: 10))
-                        .foregroundColor(Color(hex: "#DEE4FF"))
+                        .foregroundColor(Color.vText)
                     if let taskId = session.taskId {
                         Text("task: \(taskId.prefix(12))")
                             .font(.custom("JetBrains Mono", size: 9.5))
-                            .foregroundColor(Color(hex: "#5A6080"))
+                            .foregroundColor(Color.vMuted)
                     }
                 }
 
@@ -1034,7 +1170,7 @@ private struct AgentSessionCard: View {
 
                 // Running indicator
                 Circle()
-                    .fill(Color(hex: "#10D9A4"))
+                    .fill(Color.vActive)
                     .frame(width: 6, height: 6)
                     .scaleEffect(1.2)
                     .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true),
@@ -1046,17 +1182,17 @@ private struct AgentSessionCard: View {
                 HStack {
                     Text("cost")
                         .font(.custom("JetBrains Mono", size: 9))
-                        .foregroundColor(Color(hex: "#363850"))
+                        .foregroundColor(Color.vDim)
                     Spacer()
                     Text(String(format: "$%.4f / $%.2f", session.costAccrued, session.costBudget))
                         .font(.custom("JetBrains Mono", size: 9))
-                        .foregroundColor(Color(hex: "#5A6080"))
+                        .foregroundColor(Color.vMuted)
                 }
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 2).fill(Color(hex: "#1D2235")).frame(height: 3)
+                        RoundedRectangle(cornerRadius: 2).fill(Color.vBorder).frame(height: 3)
                         RoundedRectangle(cornerRadius: 2)
-                            .fill(Color(hex: "#6C63FF"))
+                            .fill(Color.vAccent)
                             .frame(width: geo.size.width * CGFloat(min(session.costAccrued / max(session.costBudget, 0.001), 1)), height: 3)
                     }
                 }
@@ -1064,10 +1200,10 @@ private struct AgentSessionCard: View {
             }
         }
         .padding(10)
-        .background(Color(hex: "#0F1218"))
+        .background(Color.vSurface)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(Color(hex: "#1D2235"), lineWidth: 1)
+                .strokeBorder(Color.vBorder, lineWidth: 1)
         )
         .cornerRadius(8)
     }
@@ -1083,7 +1219,7 @@ struct ToolFeedView: View {
             HStack {
                 Text("TOOL FEED")
                     .font(.custom("JetBrains Mono", size: 9.5))
-                    .foregroundColor(Color(hex: "#363850"))
+                    .foregroundColor(Color.vDim)
                     .tracking(1.5)
                 Spacer()
                 Button {
@@ -1091,7 +1227,7 @@ struct ToolFeedView: View {
                 } label: {
                     Image(systemName: "trash")
                         .font(.system(size: 10))
-                        .foregroundColor(Color(hex: "#363850"))
+                        .foregroundColor(Color.vDim)
                 }
                 .buttonStyle(.plain)
             }
@@ -1103,10 +1239,10 @@ struct ToolFeedView: View {
                     Spacer()
                     Image(systemName: "list.bullet.rectangle")
                         .font(.system(size: 28))
-                        .foregroundColor(Color(hex: "#363850"))
+                        .foregroundColor(Color.vDim)
                     Text("No tool activity yet")
                         .font(.system(size: 12))
-                        .foregroundColor(Color(hex: "#363850"))
+                        .foregroundColor(Color.vDim)
                     Spacer()
                 }
                 .frame(maxWidth: .infinity)
@@ -1144,17 +1280,17 @@ private struct ToolFeedRow: View {
 
             Text(item.toolName)
                 .font(.custom("JetBrains Mono", size: 10.5))
-                .foregroundColor(Color(hex: "#DEE4FF"))
+                .foregroundColor(Color.vText)
 
             Spacer()
 
             Text(item.startedAt, style: .time)
                 .font(.custom("JetBrains Mono", size: 9))
-                .foregroundColor(Color(hex: "#363850"))
+                .foregroundColor(Color.vDim)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(item.isRunning ? Color(hex: "#0F1218") : Color.clear)
+        .background(item.isRunning ? Color.vSurface : Color.clear)
         .cornerRadius(5)
     }
 
@@ -1165,9 +1301,9 @@ private struct ToolFeedRow: View {
     }
 
     private var statusColor: Color {
-        if item.isRunning { return Color(hex: "#F0A030") }
-        if item.isError   { return Color(hex: "#EF4444") }
-        return Color(hex: "#10D9A4")
+        if item.isRunning { return Color.vAmber }
+        if item.isError   { return Color.vRed }
+        return Color.vActive
     }
 }
 
@@ -1183,10 +1319,10 @@ struct RoutinesView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Routines")
                         .font(.system(size: 20, weight: .semibold))
-                        .foregroundColor(Color(hex: "#DEE4FF"))
+                        .foregroundColor(Color.vText)
                     Text("Automated triggers — edit ~/.shiro/hooks.json to add new ones")
                         .font(.system(size: 12))
-                        .foregroundColor(Color(hex: "#5A6080"))
+                        .foregroundColor(Color.vMuted)
                 }
                 Spacer()
                 Button {
@@ -1194,14 +1330,14 @@ struct RoutinesView: View {
                 } label: {
                     Label("Reload", systemImage: "arrow.clockwise")
                         .font(.system(size: 12))
-                        .foregroundColor(Color(hex: "#6C63FF"))
+                        .foregroundColor(Color.vAccent)
                 }
                 .buttonStyle(.plain)
             }
             .padding(.horizontal, 28)
             .padding(.vertical, 24)
 
-            Divider().background(Color(hex: "#1D2235")).padding(.horizontal, 20)
+            Divider().background(Color.vBorder).padding(.horizontal, 20)
 
             if let engine = appState.hooksEngine {
                 ScrollView(.vertical, showsIndicators: false) {
@@ -1215,11 +1351,11 @@ struct RoutinesView: View {
                 }
             } else {
                 Spacer()
-                Text("HooksEngine unavailable").foregroundColor(Color(hex: "#5A6080")).frame(maxWidth: .infinity)
+                Text("HooksEngine unavailable").foregroundColor(Color.vMuted).frame(maxWidth: .infinity)
                 Spacer()
             }
         }
-        .background(Color(hex: "#07090F"))
+        .background(Color.vBg)
     }
 }
 
@@ -1239,22 +1375,22 @@ private struct RoutineCard: View {
                 HStack {
                     Text(hook.name)
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(Color(hex: "#DEE4FF"))
+                        .foregroundColor(Color.vText)
                     Spacer()
                     typeBadge
                 }
                 if let desc = hook.description {
-                    Text(desc).font(.system(size: 12)).foregroundColor(Color(hex: "#5A6080")).lineLimit(2)
+                    Text(desc).font(.system(size: 12)).foregroundColor(Color.vMuted).lineLimit(2)
                 }
                 HStack(spacing: 12) {
                     actionBadge
                     if let schedule = hook.schedule {
                         Label(schedule, systemImage: "clock").font(.custom("JetBrains Mono", size: 10))
-                            .foregroundColor(Color(hex: "#363850"))
+                            .foregroundColor(Color.vDim)
                     }
                     if let path = hook.path {
                         Label(path, systemImage: "folder").font(.custom("JetBrains Mono", size: 10))
-                            .foregroundColor(Color(hex: "#363850")).lineLimit(1)
+                            .foregroundColor(Color.vDim).lineLimit(1)
                     }
                 }
             }
@@ -1266,13 +1402,13 @@ private struct RoutineCard: View {
             ))
             .toggleStyle(.switch)
             .scaleEffect(0.85)
-            .tint(Color(hex: "#6C63FF"))
+            .tint(Color.vAccent)
         }
         .padding(16)
-        .background(Color(hex: "#0F1218"))
+        .background(Color.vSurface)
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(hook.enabled ? Color(hex: "#6C63FF").opacity(0.25) : Color(hex: "#1D2235"), lineWidth: 1)
+                .strokeBorder(hook.enabled ? Color.vAccent.opacity(0.25) : Color.vBorder, lineWidth: 1)
         )
         .cornerRadius(12)
     }
@@ -1288,10 +1424,10 @@ private struct RoutineCard: View {
 
     private var typeColor: Color {
         switch hook.type {
-        case "app_launch": return Color(hex: "#10D9A4")
-        case "file_watch": return Color(hex: "#6C63FF")
-        case "schedule":   return Color(hex: "#F0A030")
-        default:           return Color(hex: "#5A6080")
+        case "app_launch": return Color.vActive
+        case "file_watch": return Color.vAccent
+        case "schedule":   return Color.vAmber
+        default:           return Color.vMuted
         }
     }
 
@@ -1313,7 +1449,7 @@ private struct RoutineCard: View {
             Text(hook.action.type)
                 .font(.custom("JetBrains Mono", size: 9.5))
         }
-        .foregroundColor(Color(hex: "#5A6080"))
+        .foregroundColor(Color.vMuted)
     }
 
     private var actionIcon: String {
@@ -1338,10 +1474,10 @@ struct BrowserControlView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Browser Control")
                         .font(.system(size: 20, weight: .semibold))
-                        .foregroundColor(Color(hex: "#DEE4FF"))
+                        .foregroundColor(Color.vText)
                     Text("Enable continuous screen capture so Shiro can see what's on your screen and act accordingly.")
                         .font(.system(size: 13))
-                        .foregroundColor(Color(hex: "#5A6080"))
+                        .foregroundColor(Color.vMuted)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -1350,20 +1486,20 @@ struct BrowserControlView: View {
                     ZStack {
                         RoundedRectangle(cornerRadius: 12)
                             .fill(appState.browserControlEnabled
-                                  ? Color(hex: "#6C63FF").opacity(0.15)
-                                  : Color(hex: "#0F1218"))
+                                  ? Color.vAccent.opacity(0.15)
+                                  : Color.vSurface)
                             .frame(width: 52, height: 52)
                         Image(systemName: appState.browserControlEnabled ? "eye.fill" : "eye")
                             .font(.system(size: 22))
-                            .foregroundColor(appState.browserControlEnabled ? Color(hex: "#6C63FF") : Color(hex: "#5A6080"))
+                            .foregroundColor(appState.browserControlEnabled ? Color.vAccent : Color.vMuted)
                     }
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Screen Awareness")
                             .font(.system(size: 15, weight: .semibold))
-                            .foregroundColor(Color(hex: "#DEE4FF"))
+                            .foregroundColor(Color.vText)
                         Text(appState.browserControlEnabled ? "Active — Shiro is watching your screen" : "Inactive — Shiro is working blind")
                             .font(.system(size: 12))
-                            .foregroundColor(Color(hex: "#5A6080"))
+                            .foregroundColor(Color.vMuted)
                     }
                     Spacer()
                     Toggle("", isOn: Binding(
@@ -1371,14 +1507,14 @@ struct BrowserControlView: View {
                         set: { appState.setBrowserControl($0) }
                     ))
                     .toggleStyle(.switch)
-                    .tint(Color(hex: "#6C63FF"))
+                    .tint(Color.vAccent)
                 }
                 .padding(18)
-                .background(Color(hex: "#0F1218"))
+                .background(Color.vSurface)
                 .overlay(
                     RoundedRectangle(cornerRadius: 14)
                         .strokeBorder(
-                            appState.browserControlEnabled ? Color(hex: "#6C63FF").opacity(0.35) : Color(hex: "#1D2235"),
+                            appState.browserControlEnabled ? Color.vAccent.opacity(0.35) : Color.vBorder,
                             lineWidth: 1
                         )
                 )
@@ -1389,14 +1525,14 @@ struct BrowserControlView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("LAST CAPTURED")
                             .font(.custom("JetBrains Mono", size: 9.5))
-                            .foregroundColor(Color(hex: "#363850"))
+                            .foregroundColor(Color.vDim)
                             .tracking(1.5)
                         Text(summary)
                             .font(.custom("JetBrains Mono", size: 12))
-                            .foregroundColor(Color(hex: "#DEE4FF"))
+                            .foregroundColor(Color.vText)
                             .padding(12)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(hex: "#0F1218"))
+                            .background(Color.vSurface)
                             .cornerRadius(8)
                     }
                 }
@@ -1412,13 +1548,13 @@ struct BrowserControlView: View {
                 } label: {
                     Label("Capture now (one-shot)", systemImage: "camera")
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(Color(hex: "#6C63FF"))
+                        .foregroundColor(Color.vAccent)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
-                        .background(Color(hex: "#6C63FF").opacity(0.1))
+                        .background(Color.vAccent.opacity(0.1))
                         .overlay(
                             RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(Color(hex: "#6C63FF").opacity(0.3), lineWidth: 1)
+                                .strokeBorder(Color.vAccent.opacity(0.3), lineWidth: 1)
                         )
                         .cornerRadius(10)
                 }
@@ -1428,20 +1564,20 @@ struct BrowserControlView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Label("Privacy", systemImage: "lock.shield")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(Color(hex: "#5A6080"))
+                        .foregroundColor(Color.vMuted)
                     Text("Screenshots are analyzed locally by your active LLM backend. Nothing is sent to external servers unless you are using the Anthropic API or Claude CLI route, in which case screenshot descriptions are included in the prompt.")
                         .font(.system(size: 11))
-                        .foregroundColor(Color(hex: "#363850"))
+                        .foregroundColor(Color.vDim)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(14)
-                .background(Color(hex: "#0F1218"))
+                .background(Color.vSurface)
                 .cornerRadius(10)
             }
             .padding(.horizontal, 28)
             .padding(.vertical, 28)
         }
-        .background(Color(hex: "#07090F"))
+        .background(Color.vBg)
     }
 }
 
@@ -1456,7 +1592,7 @@ private struct WorkspaceSettingsView: View {
             HStack {
                 Text("Settings")
                     .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(Color(hex: "#DEE4FF"))
+                    .foregroundColor(Color.vText)
                 Spacer()
             }
             .padding(.horizontal, 28)
@@ -1467,6 +1603,6 @@ private struct WorkspaceSettingsView: View {
             SettingsView()
                 .environmentObject(appState)
         }
-        .background(Color(hex: "#07090F"))
+        .background(Color.vBg)
     }
 }

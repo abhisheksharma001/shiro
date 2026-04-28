@@ -74,6 +74,11 @@ final class ClaudeCodeRouter: BridgeRouter {
         var env = ProcessInfo.processInfo.environment
         env.removeValue(forKey: "ANTHROPIC_API_KEY")     // use subscription, not API key
         env.removeValue(forKey: "ANTHROPIC_BASE_URL")
+        // MCP integration credentials (Composio, GitHub, HuggingFace) — pulled
+        // from Keychain and exposed to child MCP servers spawned by the CLI.
+        if let k = KeychainHelper.get(.composioAPIKey),    !k.isEmpty { env["COMPOSIO_API_KEY"]              = k }
+        if let k = KeychainHelper.get(.githubToken),       !k.isEmpty { env["GITHUB_PERSONAL_ACCESS_TOKEN"]  = k }
+        if let k = KeychainHelper.get(.huggingFaceToken),  !k.isEmpty { env["HF_TOKEN"]                      = k }
         proc.environment = env
 
         let stdin = Pipe(); let stdout = Pipe(); let stderr = Pipe()

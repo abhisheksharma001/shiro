@@ -1,43 +1,73 @@
 /*
- AESTHETIC: Void Interface — Dark Agentic Pill
- ──────────────────────────────────────────────
- Background:  #07090F  (deep space, almost-black with midnight-blue undertone)
- Surface:     #0F1218  (card / message bg)
- Border:      #1D2235
- Accent:      #6C63FF  (indigo-violet — AI-native, distinctive)
- Active:      #10D9A4  (teal-emerald — running, success)
- Amber:       #F0A030  (thinking, warning)
- Red:         #EF4444  (error, stop)
- Text:        #DEE4FF  (cool near-white)
- Muted:       #5A6080
+ AESTHETIC: Claude — Editorial Warmth
+ ────────────────────────────────────
+ A direct homage to the visual identity of Anthropic's Claude apps:
+ warm charcoals (not cold blues), Claude's signature copper accent,
+ cream text, and an editorial typographic voice (serif for display
+ moments, SF Pro for prose, JetBrains Mono only for code/IDs).
 
- Font:        JetBrains Mono — all status/code/IDs
-              SF Pro — prose, descriptions
+ BG:        #1A1916  (warm charcoal — Claude chat surface)
+ Sidebar:   #211E1B  (slightly raised warm)
+ Surface:   #25221E  (assistant bubble)
+ Elevated:  #2E2A26  (hover, focus)
+ Border:    #3A3530  (subtle warm hairline)
+ Accent:    #D97757  (CLAUDE COPPER — Anthropic's signature warm orange)
+ Active:    #B8946A  (warm gold — running / success)
+ Amber:     #D4A574  (thinking, warning)
+ Red:       #D86553  (error — warm-tinted)
+ Text:      #F2EDE5  (warm cream, not cold white)
+ Muted:     #8B847C  (warm gray)
+ DimMuted:  #5C544C  (placeholder text)
 
- Layout:      700pt fixed-width pill at top of screen
-              Expands downward when chat is active (window auto-resizes)
-              Collapses back to 60pt compact bar when idle
+ Type:      "New York" / Charter (system serif) — display headings, wordmark
+            SF Pro Text — body, UI labels
+            JetBrains Mono — code, route labels, technical badges only
 
- Signature:   Pulsing orb with color-coded state
-              Sub-agent count badge (top-right)
-              Expand → open main Shiro window
+ Layout:    Generous whitespace, light hairlines, soft 12-14pt corners.
+            Asymmetry: input bar weighted left; tools/agents right.
 */
 
 import SwiftUI
 import MarkdownUI
 
-// MARK: - Palette
+// MARK: - Palette  (Claude — Editorial Warmth)
 
-private extension Color {
-    static let vBg      = Color(hex: "#07090F")
-    static let vSurface = Color(hex: "#0F1218")
-    static let vBorder  = Color(hex: "#1D2235")
-    static let vAccent  = Color(hex: "#6C63FF")
-    static let vActive  = Color(hex: "#10D9A4")
-    static let vAmber   = Color(hex: "#F0A030")
-    static let vRed     = Color(hex: "#EF4444")
-    static let vText    = Color(hex: "#DEE4FF")
-    static let vMuted   = Color(hex: "#5A6080")
+extension Color {
+    // — Backgrounds —
+    static let vBg       = Color(hex: "#1A1916")   // warm charcoal
+    static let vSidebar  = Color(hex: "#211E1B")
+    static let vSurface  = Color(hex: "#25221E")
+    static let vElev     = Color(hex: "#2E2A26")
+    // — Lines —
+    static let vBorder   = Color(hex: "#3A3530")
+    static let vBorderHi = Color(hex: "#4A433D")
+    // — Accents —
+    static let vAccent   = Color(hex: "#D97757")   // Claude copper
+    static let vAccent2  = Color(hex: "#C8845F")   // hover/pressed
+    static let vActive   = Color(hex: "#B8946A")   // warm gold (running)
+    static let vAmber    = Color(hex: "#D4A574")
+    static let vRed      = Color(hex: "#D86553")
+    // — Text —
+    static let vText     = Color(hex: "#F2EDE5")   // warm cream
+    static let vMuted    = Color(hex: "#8B847C")
+    static let vDim      = Color(hex: "#5C544C")
+}
+
+// MARK: - Type system
+
+enum ShiroFont {
+    /// Editorial serif (system "New York" on macOS) — for wordmarks + display headings.
+    static func serif(size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight, design: .serif)
+    }
+    /// SF Pro Text — body, prose, UI labels.
+    static func ui(size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight)
+    }
+    /// JetBrains Mono — code, route labels, technical badges, IDs.
+    static func mono(size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        .custom("JetBrains Mono", size: size).weight(weight)
+    }
 }
 
 // MARK: - FloatingBarView
@@ -45,13 +75,18 @@ private extension Color {
 struct FloatingBarView: View {
     @EnvironmentObject var appState: AppState
     @State private var inputText:   String = ""
-    @State private var isExpanded:  Bool   = false
     @State private var isTyping:    Bool   = false
     @State private var currentSendId: UUID? = nil
     @FocusState private var inputFocused: Bool
 
     // Computed alias into shared conversation
     private var messages: [DisplayMessage] { appState.conversationMessages }
+
+    /// Single source of truth — drives both this view AND the NSPanel frame
+    /// (FloatingBarWindowController observes the same property via Combine).
+    private var isExpanded: Bool {
+        get { appState.isFloatingExpanded }
+    }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -75,16 +110,12 @@ struct FloatingBarView: View {
                     if appState.isMeetingMode {
                         divider
                         MeetingModeView { _ in collapse() }
-                            .transition(expandTransition)
                     } else if isExpanded {
                         divider
                         chatPanel
-                            .transition(expandTransition)
                     }
                 }
             }
-            .animation(.spring(response: 0.32, dampingFraction: 0.82), value: isExpanded)
-            .animation(.spring(response: 0.32, dampingFraction: 0.82), value: appState.isMeetingMode)
         }
         .padding(.horizontal, 0)
         .onAppear { checkConnectivity() }
@@ -114,8 +145,11 @@ struct FloatingBarView: View {
                     .focused($inputFocused)
                     .onSubmit { sendMessage() }
                     .onChange(of: inputFocused) { _, focused in
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
-                            isExpanded = focused || !messages.isEmpty
+                        let want = focused || !messages.isEmpty
+                        if appState.isFloatingExpanded != want {
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                                appState.isFloatingExpanded = want
+                            }
                         }
                     }
             }
@@ -131,7 +165,10 @@ struct FloatingBarView: View {
                     icon: appState.isMeetingMode ? "waveform.circle.fill" : "waveform.circle",
                     color: appState.isMeetingMode ? .vAmber : .vMuted
                 ) {
-                    withAnimation { appState.isMeetingMode.toggle(); if appState.isMeetingMode { isExpanded = true } }
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                        appState.isMeetingMode.toggle()
+                        if appState.isMeetingMode { appState.isFloatingExpanded = true }
+                    }
                 }
                 .help(appState.isMeetingMode ? "Exit meeting mode" : "Meeting mode")
 
@@ -140,7 +177,7 @@ struct FloatingBarView: View {
                     barButton(
                         icon: appState.isListening ? "mic.fill" : "mic",
                         color: appState.isListening ? .vActive : .vMuted
-                    ) { toggleListening() }
+                    ) { appState.toggleListening() }
                     .help(appState.isListening ? "Stop mic" : "Push to talk")
                 }
 
@@ -173,6 +210,9 @@ struct FloatingBarView: View {
     // MARK: - Chat Panel (expanded, scrollable)
 
     private var chatPanel: some View {
+        // FIXED height — never let SwiftUI grow the panel based on content,
+        // because the NSPanel auto-resizes against this and we get an
+        // NSISEngine constraint feedback loop → stack-overflow crash.
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: false) {
@@ -190,7 +230,7 @@ struct FloatingBarView: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 12)
                 }
-                .frame(maxHeight: 420)
+                .frame(height: 440)               // fixed, NOT maxHeight
                 .onChange(of: messages.count) { _, _ in
                     withAnimation { proxy.scrollTo(messages.last?.id) }
                 }
@@ -211,9 +251,13 @@ struct FloatingBarView: View {
                     Spacer()
                 }
                 .padding(.horizontal, 16)
-                .padding(.bottom, 10)
+                .padding(.bottom, 8)
+                .frame(height: 22)
+            } else {
+                Spacer().frame(height: 8)
             }
         }
+        .frame(height: 472)                       // total = 440 + 32 footer
     }
 
     // MARK: - State Orb
@@ -300,13 +344,21 @@ struct FloatingBarView: View {
     // MARK: - Helpers
 
     private var placeholder: String {
+        // Surface bridge problems immediately rather than showing a generic prompt.
+        switch appState.bridgeStatus {
+        case .offline(let reason): return "⚠  bridge offline — \(reason)"
+        case .restarting:           return "↻ restarting bridge…"
+        case .failingOver:          return "↻ failing over backend…"
+        case .starting:             return "starting bridge…"
+        case .running:              break
+        }
         switch appState.activeRouteMode {
-        case .claudeCode: return "Ask Shiro via Claude CLI…  (⌘.)"
-        case .anthropic:  return "Ask Shiro via API…  (⌘.)"
+        case .claudeCode: return "Ask Shiro · via Claude CLI · type /  to use a skill"
+        case .anthropic:  return "Ask Shiro · via Anthropic API · /forecast /research /ingest …"
         case .lmStudio:
             return appState.lmStudioConnected
-                ? "Ask Shiro…  (⌘.)"
-                : "⚠  LM Studio not connected"
+                ? "Ask Shiro · local LM Studio · /forecast /research …"
+                : "⚠  LM Studio not connected — open Settings → Route"
         }
     }
 
@@ -317,15 +369,10 @@ struct FloatingBarView: View {
             .padding(.horizontal, 12)
     }
 
-    private var expandTransition: AnyTransition {
-        .asymmetric(
-            insertion: .move(edge: .top).combined(with: .opacity),
-            removal:   .move(edge: .top).combined(with: .opacity)
-        )
-    }
-
     private func collapse() {
-        withAnimation { isExpanded = false }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            appState.isFloatingExpanded = false
+        }
     }
 
     // MARK: - Actions
@@ -355,7 +402,9 @@ struct FloatingBarView: View {
         isTyping             = true
         appState.isProcessing = true
         appState.agentStatus  = .thinking
-        withAnimation { isExpanded = true }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            appState.isFloatingExpanded = true
+        }
 
         let reqId = UUID()
         currentSendId = reqId
@@ -401,22 +450,6 @@ struct FloatingBarView: View {
         isTyping              = false
     }
 
-    private func toggleListening() {
-        if appState.isListening {
-            appState.isListening = false
-            appState.agentStatus = .idle
-            _ = appState.stt?.stopMeetingMode()
-        } else {
-            appState.isListening = true
-            appState.agentStatus = .listening
-            appState.stt?.onSegment = { [weak appState] seg in
-                guard seg.isFinal else { return }
-                Task { @MainActor in appState?.currentTranscript = seg.text }
-            }
-            appState.stt?.startMeetingMode()
-        }
-    }
-
     private func checkConnectivity() {
         Task {
             let ok = await appState.lmStudio?.healthCheck() ?? false
@@ -446,26 +479,31 @@ struct MessageBubble: View {
                 Spacer(minLength: 64)
                 VStack(alignment: .trailing, spacing: 4) {
                     Text(message.content)
-                        .font(.custom("JetBrains Mono", size: 12))
-                        .foregroundColor(Color(hex: "#07090F"))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
+                        .font(ShiroFont.ui(size: 12.5))
+                        .foregroundColor(Color.vBg)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 9)
                         .background(Color.vAccent)
-                        .cornerRadius(14)
-                        .vCornerRadius(3, corners: .topRight)
+                        .clipShape(
+                            UnevenRoundedRectangle(
+                                topLeadingRadius: 14, bottomLeadingRadius: 14,
+                                bottomTrailingRadius: 14, topTrailingRadius: 4,
+                                style: .continuous
+                            )
+                        )
                     if let badge = message.badge {
                         Text(badge)
-                            .font(.custom("JetBrains Mono", size: 9))
-                            .foregroundColor(.vAccent.opacity(0.7))
+                            .font(ShiroFont.mono(size: 9))
+                            .foregroundColor(.vAccent.opacity(0.75))
                     }
                 }
             } else if message.role == .assistant {
                 VStack(alignment: .leading, spacing: 6) {
-                    // Agent label
+                    // Wordmark — serif "Shiro" in copper
                     HStack(spacing: 5) {
                         Circle().fill(Color.vAccent).frame(width: 5, height: 5)
-                        Text("shiro")
-                            .font(.system(size: 9, weight: .bold))
+                        Text("Shiro")
+                            .font(ShiroFont.serif(size: 11, weight: .semibold))
                             .foregroundColor(.vAccent)
                     }
 
@@ -474,7 +512,7 @@ struct MessageBubble: View {
                     } else {
                         Markdown(message.content)
                             .markdownTheme(.shiroTheme)
-                            .font(.system(size: 12.5))
+                            .font(ShiroFont.ui(size: 12.5))
                             .foregroundColor(.vText)
                     }
 
@@ -485,11 +523,16 @@ struct MessageBubble: View {
                         }
                     }
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 9)
+                .padding(.horizontal, 13)
+                .padding(.vertical, 10)
                 .background(Color.vSurface)
-                .cornerRadius(14)
-                .vCornerRadius(3, corners: .topLeft)
+                .clipShape(
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: 4, bottomLeadingRadius: 14,
+                        bottomTrailingRadius: 14, topTrailingRadius: 14,
+                        style: .continuous
+                    )
+                )
                 Spacer(minLength: 64)
             }
         }
@@ -717,40 +760,74 @@ private struct APIKeysTab: View {
     @State private var telegramChatId: String = KeychainHelper.get(.telegramChatId)    ?? ""
     @State private var openAIKey:      String = KeychainHelper.get(.openAIAPIKey)      ?? ""
     @State private var openAIBase:     String = KeychainHelper.get(.openAIBaseURL)     ?? ""
+    @State private var composioKey:    String = KeychainHelper.get(.composioAPIKey)    ?? ""
+    @State private var githubToken:    String = KeychainHelper.get(.githubToken)       ?? ""
+    @State private var hfToken:        String = KeychainHelper.get(.huggingFaceToken)  ?? ""
     @State private var saved = false
 
     var body: some View {
-        Form {
-            Section {
-                Text("All keys are stored in your macOS Keychain — never in plain text.")
-                    .font(.system(size: 11)).foregroundColor(.secondary)
-            }
-            Section("Anthropic (BYOK)") {
-                SecureTextField("sk-ant-…", text: $anthropicKey)
-                if !anthropicKey.isEmpty {
-                    Text(anthropicKey.hasPrefix("sk-ant-") ? "✅ Valid format" : "⚠️ Should start with sk-ant-")
+        ScrollView {
+            Form {
+                Section {
+                    Text("All keys are stored in your macOS Keychain — never on disk in plain text.")
+                        .font(.system(size: 11)).foregroundColor(.secondary)
+                }
+                Section("Anthropic (BYOK)") {
+                    SecureTextField("sk-ant-…", text: $anthropicKey)
+                    if !anthropicKey.isEmpty {
+                        Text(anthropicKey.hasPrefix("sk-ant-") ? "✅ Valid format" : "⚠️ Should start with sk-ant-")
+                            .font(.system(size: 11))
+                            .foregroundColor(anthropicKey.hasPrefix("sk-ant-") ? .green : .orange)
+                    }
+                }
+                Section("Deepgram STT") {
+                    SecureTextField("Deepgram API key…", text: $deepgramKey)
+                }
+                Section("Telegram (remote approvals)") {
+                    SecureTextField("Bot token from @BotFather…", text: $telegramToken)
+                    TextField("Your chat ID from @userinfobot…", text: $telegramChatId).textFieldStyle(.roundedBorder)
+                }
+                Section("OpenAI-compatible endpoint") {
+                    SecureTextField("API key (or 'local' for no auth)…", text: $openAIKey)
+                    TextField("Base URL (e.g. http://localhost:1234/v1)…", text: $openAIBase).textFieldStyle(.roundedBorder)
+                }
+                Section("Composio  ▸  250+ integrations (Gmail, Slack, Notion, …)") {
+                    SecureTextField("Composio API key…", text: $composioKey)
+                    Link("Get one at app.composio.dev",
+                         destination: URL(string: "https://app.composio.dev/")!)
                         .font(.system(size: 11))
-                        .foregroundColor(anthropicKey.hasPrefix("sk-ant-") ? .green : .orange)
+                    Text("Enable the 'composio' MCP server in the MCP Servers tab after saving.")
+                        .font(.system(size: 11)).foregroundColor(.secondary)
+                }
+                Section("GitHub  ▸  repo / gist / org access") {
+                    SecureTextField("Personal access token (ghp_…)", text: $githubToken)
+                    Link("Create a token at github.com/settings/tokens",
+                         destination: URL(string: "https://github.com/settings/tokens")!)
+                        .font(.system(size: 11))
+                    Text("Scopes recommended: repo, read:org, gist, read:user.")
+                        .font(.system(size: 11)).foregroundColor(.secondary)
+                }
+                Section("Hugging Face  ▸  hub access") {
+                    SecureTextField("HF token (hf_…)", text: $hfToken)
+                    Link("Create one at huggingface.co/settings/tokens",
+                         destination: URL(string: "https://huggingface.co/settings/tokens")!)
+                        .font(.system(size: 11))
+                }
+                Section {
+                    HStack {
+                        Spacer()
+                        if saved {
+                            Label("Saved!", systemImage: "checkmark.circle.fill")
+                                .foregroundColor(.green).font(.system(size: 12))
+                        }
+                        Button("Save to Keychain") { saveAll() }.buttonStyle(.borderedProminent)
+                    }
+                    Text("Most key changes apply to the next bridge restart — toggle the route in the Route tab to apply immediately.")
+                        .font(.system(size: 10.5)).foregroundColor(.secondary)
                 }
             }
-            Section("Deepgram STT") {
-                SecureTextField("Deepgram API key…", text: $deepgramKey)
-            }
-            Section("Telegram (remote approvals)") {
-                SecureTextField("Bot token from @BotFather…", text: $telegramToken)
-                TextField("Your chat ID from @userinfobot…", text: $telegramChatId).textFieldStyle(.roundedBorder)
-            }
-            Section("OpenAI-compatible endpoint") {
-                SecureTextField("API key (or 'local' for no auth)…", text: $openAIKey)
-                TextField("Base URL (e.g. http://localhost:1234/v1)…", text: $openAIBase).textFieldStyle(.roundedBorder)
-            }
-            HStack {
-                Spacer()
-                if saved { Label("Saved!", systemImage: "checkmark.circle.fill").foregroundColor(.green).font(.system(size: 12)) }
-                Button("Save to Keychain") { saveAll() }.buttonStyle(.borderedProminent)
-            }.padding(.top, 4)
+            .formStyle(.grouped)
         }
-        .formStyle(.grouped)
     }
 
     private func saveAll() {
@@ -760,6 +837,9 @@ private struct APIKeysTab: View {
         KeychainHelper.set(telegramChatId, for: .telegramChatId)
         KeychainHelper.set(openAIKey,      for: .openAIAPIKey)
         KeychainHelper.set(openAIBase,     for: .openAIBaseURL)
+        KeychainHelper.set(composioKey,    for: .composioAPIKey)
+        KeychainHelper.set(githubToken,    for: .githubToken)
+        KeychainHelper.set(hfToken,        for: .huggingFaceToken)
         saved = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { saved = false }
     }
@@ -919,12 +999,45 @@ struct VRoundedCornerShape: Shape {
 // MARK: - Markdown theme
 
 extension Theme {
+    /// Markdown theme tuned for the Claude — Editorial Warmth palette.
+    /// Headings use the system serif; inline code uses warm gold; copper
+    /// accents anchor heading + link colors.
     static var shiroTheme: Theme {
         Theme()
             .text { ForegroundColor(.vText) }
             .code { FontFamilyVariant(.monospaced); ForegroundColor(.vActive) }
-            .strong { FontWeight(.bold) }
-            .heading1 { cfg in cfg.label.markdownTextStyle { ForegroundColor(.vAccent); FontWeight(.bold) } }
-            .heading2 { cfg in cfg.label.markdownTextStyle { ForegroundColor(.vAccent); FontWeight(.semibold) } }
+            .strong { FontWeight(.semibold) }
+            .emphasis { FontStyle(.italic) }
+            .link { ForegroundColor(.vAccent); UnderlineStyle(.single) }
+            .heading1 { cfg in
+                cfg.label.markdownTextStyle {
+                    FontFamily(.system(.serif))
+                    FontWeight(.semibold)
+                    FontSize(18)
+                    ForegroundColor(.vText)
+                }
+            }
+            .heading2 { cfg in
+                cfg.label.markdownTextStyle {
+                    FontFamily(.system(.serif))
+                    FontWeight(.semibold)
+                    FontSize(16)
+                    ForegroundColor(.vText)
+                }
+            }
+            .heading3 { cfg in
+                cfg.label.markdownTextStyle {
+                    FontWeight(.semibold)
+                    ForegroundColor(.vAccent)
+                }
+            }
+            .blockquote { cfg in
+                cfg.label
+                    .padding(.leading, 12)
+                    .overlay(alignment: .leading) {
+                        Rectangle().fill(Color.vAccent.opacity(0.6)).frame(width: 2)
+                    }
+                    .markdownTextStyle { ForegroundColor(.vMuted); FontStyle(.italic) }
+            }
     }
 }

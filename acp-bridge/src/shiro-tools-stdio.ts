@@ -13,6 +13,9 @@
 
 import { createInterface } from "readline";
 import { createConnection, type Socket } from "net";
+import { spawn } from "child_process";
+import { homedir } from "os";
+import { join } from "path";
 import type {
   PipeMessage,
   PipeToolResultMessage,
@@ -366,6 +369,37 @@ const TOOLS: ToolDef[] = [
     risk: "low",
     mutates: false,
   },
+  {
+    name: "forecast_timeseries",
+    description: [
+      "Run ARIMA + SARIMA + Prophet ensemble forecasting on a time series.",
+      "Two data sources: (1) source='yfinance' + target='AAPL' for automatic financial data fetch,",
+      "or (2) source='custom' + data='<CSV text or JSON array>' for user-provided data.",
+      "Returns: summary stats, model RMSE scores, ensemble forecast, and a base64 PNG chart.",
+      "The chart field is `chart_base64` — Shiro will render it inline automatically.",
+      "Always try yfinance first for tickers. Ask user for data only if yfinance fails.",
+    ].join(" "),
+    inputSchema: {
+      type: "object",
+      properties: {
+        source: { type: "string", enum: ["yfinance", "custom"], description: "'yfinance' to auto-fetch or 'custom' to provide data." },
+        target: { type: "string", description: "Stock ticker (e.g. 'AAPL', 'BTC-USD') — only for source='yfinance'." },
+        data: { type: "string", description: "CSV text or JSON array — only for source='custom'. First col=date, second col=value. Or specify date_col/value_col." },
+        date_col: { type: "string", description: "Name of the date column (custom source)." },
+        value_col: { type: "string", description: "Name of the value column (custom source)." },
+        periods: { type: "number", description: "How many future periods to forecast (default 30)." },
+        freq: { type: "string", description: "Frequency: D=daily, W=weekly, M=monthly, Q=quarterly (default D)." },
+        models: {
+          type: "array",
+          items: { type: "string", enum: ["arima", "sarima", "prophet"] },
+          description: "Which models to run (default: all three). Ensemble weights by inverse RMSE.",
+        },
+      },
+      required: ["source"],
+    },
+    risk: "low",
+    mutates: false,
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -378,6 +412,131 @@ function sendRpc(msg: Record<string, unknown>): void {
 
 function rpcError(id: unknown, code: number, message: string): void {
   sendRpc({ jsonrpc: "2.0", id, error: { code, message } });
+}
+
+// ---------------------------------------------------------------------------
+// Local forecast execution (Python subprocess)
+// ---------------------------------------------------------------------------
+
+interface ForecastResult {
+  isError: boolean;
+  text: string;
+  chartBase64?: string;
+}
+
+async function runForecastLocally(
+  args: Record<string, unknown>,
+): Promise<ForecastResult> {
+  const scriptPath = join(homedir(), ".shiro", "tools", "forecast.py");
+  const inputJson = JSON.stringify(args);
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      child.kill();
+      resolve({ isError: true, text: "Error: forecast script timed out after 120s" });
+    }, 120_000);
+
+    let stdout = "";
+    let stderr = "";
+
+    const child = spawn("python3", [scriptPath], {
+      env: { ...process.env },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    child.stdin.write(inputJson);
+    child.stdin.end();
+
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        resolve({
+          isError: true,
+          text: `Forecast script exited with code ${code}.\n${stderr.slice(0, 2000)}`,
+        });
+        return;
+      }
+
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(stdout.trim()) as Record<string, unknown>;
+      } catch {
+        resolve({
+          isError: true,
+          text: `Forecast script returned invalid JSON.\nstdout: ${stdout.slice(0, 1000)}\nstderr: ${stderr.slice(0, 500)}`,
+        });
+        return;
+      }
+
+      if (parsed.error || parsed.status === "error") {
+        const errMsg = parsed.message ?? parsed.error ?? "unknown forecast error";
+        resolve({ isError: true, text: `Forecast error: ${String(errMsg)}` });
+        return;
+      }
+
+      // Build a readable text summary (keys match forecast.py schema)
+      const lines: string[] = [];
+      if (parsed.target)         lines.push(`📈 **${String(parsed.target)}** forecast`);
+      if (parsed.freq)           lines.push(`Frequency: ${String(parsed.freq)}  |  History: ${String(parsed.history_rows ?? "?")} points`);
+      if (parsed.seasonal_period) lines.push(`Seasonal period detected: ${String(parsed.seasonal_period)}`);
+      if (parsed.best_model)     lines.push(`Best model: **${String(parsed.best_model)}**`);
+
+      const models = parsed.models as Record<string, Record<string, unknown>> | undefined;
+      if (models && Object.keys(models).length > 0) {
+        lines.push("\n**Model scores:**");
+        lines.push("| Model | Params | AIC | RMSE | MAPE% |");
+        lines.push("|-------|--------|-----|------|-------|");
+        for (const [name, s] of Object.entries(models)) {
+          const params = String(s.params ?? "-");
+          const aic    = s.aic    != null ? Number(s.aic).toFixed(2) : "-";
+          const rmse_  = s.rmse   != null ? Number(s.rmse).toFixed(4) : "-";
+          const mape_  = s.mape   != null ? Number(s.mape).toFixed(2) : "-";
+          lines.push(`| ${name} | ${params} | ${aic} | ${rmse_} | ${mape_} |`);
+        }
+      }
+
+      const weights = parsed.ensemble_weights as Record<string, number> | undefined;
+      if (weights && Object.keys(weights).length > 1) {
+        const parts = Object.entries(weights).map(([k, v]) => `${k}=${Number(v).toFixed(2)}`);
+        lines.push(`\nEnsemble weights: ${parts.join(", ")}`);
+      }
+
+      const forecast = parsed.forecast as Array<{ ds: string; yhat: number; yhat_lower?: number; yhat_upper?: number }> | undefined;
+      if (forecast && forecast.length > 0) {
+        lines.push("\n**Forecast (first 10 periods):**");
+        lines.push("| Date | Forecast | Low | High |");
+        lines.push("|------|----------|-----|------|");
+        for (const row of forecast.slice(0, 10)) {
+          const lo = row.yhat_lower != null ? row.yhat_lower.toFixed(2) : "-";
+          const hi = row.yhat_upper != null ? row.yhat_upper.toFixed(2) : "-";
+          lines.push(`| ${row.ds} | ${row.yhat.toFixed(2)} | ${lo} | ${hi} |`);
+        }
+        if (forecast.length > 10) {
+          lines.push(`\n_… and ${forecast.length - 10} more periods_`);
+        }
+      }
+
+      const chartBase64 = typeof parsed.chart_base64 === "string" ? parsed.chart_base64 : undefined;
+      if (chartBase64) lines.push("\n_Chart rendered below ↓_");
+
+      resolve({
+        isError: false,
+        text: lines.join("\n"),
+        chartBase64,
+      });
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timeout);
+      resolve({
+        isError: true,
+        text: `Failed to spawn forecast script: ${err.message}\nMake sure python3 is installed and ~/.shiro/tools/forecast.py exists.`,
+      });
+    });
+  });
 }
 
 async function handleToolCall(
@@ -412,6 +571,37 @@ async function handleToolCall(
   if (name === "execute_sql") {
     const q = String(args.query ?? "").trim().toUpperCase();
     effectiveRisk = q.startsWith("SELECT") || q.startsWith("WITH") ? "low" : "high";
+  }
+
+  // forecast_timeseries runs locally via Python — NOT forwarded to Swift.
+  if (name === "forecast_timeseries") {
+    const forecastResult = await runForecastLocally(args);
+    if (!isNotification) {
+      if (forecastResult.isError) {
+        sendRpc({
+          jsonrpc: "2.0",
+          id,
+          result: {
+            content: [{ type: "text", text: forecastResult.text }],
+            isError: true,
+          },
+        });
+      } else {
+        // Return text summary + separate image block if chart available.
+        const content: Array<Record<string, unknown>> = [
+          { type: "text", text: forecastResult.text },
+        ];
+        if (forecastResult.chartBase64) {
+          content.push({
+            type: "image",
+            data: forecastResult.chartBase64,
+            mimeType: "image/png",
+          });
+        }
+        sendRpc({ jsonrpc: "2.0", id, result: { content } });
+      }
+    }
+    return;
   }
 
   const justification = typeof args.description === "string" ? args.description : undefined;

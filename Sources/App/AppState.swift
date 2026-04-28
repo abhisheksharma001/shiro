@@ -24,6 +24,12 @@ final class AppState: ObservableObject {
     // MARK: - Conversation (shared between floating bar and main window)
     @Published var conversationMessages:  [DisplayMessage] = []
 
+    /// Floating-bar expansion state — single source of truth. The window controller
+    /// observes this via Combine and animates the NSPanel frame manually. Doing
+    /// it this way (instead of NSHostingController.sizingOptions) avoids the
+    /// NSISEngine feedback loop / stack-overflow crash we hit at 18:50 / 19:19.
+    @Published var isFloatingExpanded:    Bool    = false
+
     // MARK: - Browser Control
     @Published var browserControlEnabled: Bool    = false
     @Published var latestScreenSummary:   String? = nil
@@ -37,6 +43,9 @@ final class AppState: ObservableObject {
     @Published var uiShowAgentsPanel:  Bool = UserDefaults.standard.object(forKey: "uiShowAgentsPanel")  as? Bool ?? true
     @Published var uiShowToolFeed:     Bool = UserDefaults.standard.object(forKey: "uiShowToolFeed")     as? Bool ?? true
     @Published var uiSubAgentStyle:    SubAgentDisplayStyle = SubAgentDisplayStyle(rawValue: UserDefaults.standard.string(forKey: "uiSubAgentStyle") ?? "") ?? .panel
+
+    // MARK: - Forecast Mode
+    @Published var forecastModeEnabled: Bool = UserDefaults.standard.object(forKey: "forecastModeEnabled") as? Bool ?? false
 
     // MARK: - Tool Activity Feed (live append from bridge events)
     @Published var toolActivityFeed:   [ToolActivityItem] = []
@@ -362,17 +371,16 @@ final class AppState: ObservableObject {
         case .toolFinished(let sk, let callId, let output, let isErr):
             // Update global feed
             if let idx = toolActivityFeed.firstIndex(where: { $0.callId == callId }) {
-                var item = toolActivityFeed[idx]
-                // ToolActivityItem is a struct — rebuild it
+                let prev = toolActivityFeed[idx]
                 toolActivityFeed[idx] = ToolActivityItem(
-                    callId:     item.callId,
-                    toolName:   item.toolName,
+                    callId:     prev.callId,
+                    toolName:   prev.toolName,
                     sessionKey: sk,
-                    input:      item.input,
+                    input:      prev.input,
                     output:     String(output.prefix(120)),
                     isError:    isErr,
                     isRunning:  false,
-                    startedAt:  item.startedAt
+                    startedAt:  prev.startedAt
                 )
             }
             // Update inline chip on last assistant message
@@ -381,6 +389,13 @@ final class AppState: ObservableObject {
                     conversationMessages[i].toolCalls[j].output    = String(output.prefix(80))
                     conversationMessages[i].toolCalls[j].isError   = isErr
                     conversationMessages[i].toolCalls[j].isRunning = false
+                    // Extract chart image when forecast_timeseries completes successfully
+                    if !isErr && conversationMessages[i].toolCalls[j].name == "forecast_timeseries",
+                       let data = output.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let chartBase64 = json["chart_base64"] as? String {
+                        conversationMessages[i].imageBase64 = chartBase64
+                    }
                     break
                 }
             }
@@ -402,9 +417,45 @@ final class AppState: ObservableObject {
 
     // MARK: - Conversation
 
+    /// Wipe the chat thread, tool feed, and any in-flight turn.
+    /// Safe to call mid-stream — the agent is interrupted first so leftover
+    /// streaming tokens don't repopulate the cleared conversation.
     func clearConversation() {
+        if isProcessing {
+            agentCoordinator?.bridge?.interrupt(sessionKey: "main")
+            acpBridge?.interrupt(sessionKey: "main")
+            // Drop streaming callbacks so any pending tokens are discarded.
+            agentCoordinator?.onStreamingToken = nil
+            agentCoordinator?.onTurnComplete   = nil
+        }
+        isProcessing          = false
+        agentStatus           = .idle
         conversationMessages.removeAll()
         toolActivityFeed.removeAll()
+        // Collapse the floating bar back to compact when emptied.
+        isFloatingExpanded = false
+    }
+
+    // MARK: - Mic / Listening (shared toggle for floating bar + sidebar)
+
+    /// Single entry point for mic toggle. Both the floating-bar mic button
+    /// and the sidebar Mic toggle in the workspace window call this.
+    func toggleListening() {
+        if isListening {
+            isListening = false
+            agentStatus = .idle
+            _ = stt?.stopMeetingMode()
+        } else {
+            isListening = true
+            agentStatus = .listening
+            stt?.onSegment = { [weak self] seg in
+                guard seg.isFinal else { return }
+                Task { @MainActor [weak self] in
+                    self?.currentTranscript = seg.text
+                }
+            }
+            stt?.startMeetingMode()
+        }
     }
 
     // MARK: - UI Preferences Persistence
@@ -413,6 +464,7 @@ final class AppState: ObservableObject {
         UserDefaults.standard.set(uiShowAgentsPanel, forKey: "uiShowAgentsPanel")
         UserDefaults.standard.set(uiShowToolFeed, forKey: "uiShowToolFeed")
         UserDefaults.standard.set(uiSubAgentStyle.rawValue, forKey: "uiSubAgentStyle")
+        UserDefaults.standard.set(forecastModeEnabled, forKey: "forecastModeEnabled")
     }
 }
 
@@ -425,14 +477,17 @@ struct DisplayMessage: Identifiable, Equatable {
     let timestamp: Date
     var badge: String?
     var toolCalls: [ToolCallInfo]
+    /// Base64-encoded PNG — set by forecast_timeseries tool result rendering.
+    var imageBase64: String?
 
-    init(role: MessageRole, content: String, badge: String? = nil) {
-        self.id        = UUID()
-        self.role      = role
-        self.content   = content
-        self.timestamp = Date()
-        self.badge     = badge
-        self.toolCalls = []
+    init(role: MessageRole, content: String, badge: String? = nil, imageBase64: String? = nil) {
+        self.id          = UUID()
+        self.role        = role
+        self.content     = content
+        self.timestamp   = Date()
+        self.badge       = badge
+        self.toolCalls   = []
+        self.imageBase64 = imageBase64
     }
 
     enum MessageRole { case user, assistant, system }
