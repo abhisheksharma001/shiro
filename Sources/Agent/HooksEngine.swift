@@ -356,6 +356,51 @@ final class HooksEngine: ObservableObject {
         }
     }
 
+    // MARK: - Append / Delete
+
+    /// Append a new hook, persist, and start its watcher/timer immediately.
+    /// Returns an error string if a hook with the same name already exists.
+    @discardableResult
+    func appendHook(_ hook: Hook) -> String? {
+        guard !hooks.contains(where: { $0.name == hook.name }) else {
+            return "A routine named '\(hook.name)' already exists."
+        }
+        hooks.append(hook)
+        save()
+        if hook.enabled {
+            switch hook.type {
+            case "file_watch": startFileWatch(hook: hook)
+            case "schedule":   startSchedule(hook: hook)
+            case "app_launch": fire(hook: hook, reason: "created")
+            default: break
+            }
+        }
+        return nil
+    }
+
+    /// Remove a hook by name, persist, and stop any active watcher/timer.
+    func deleteHook(named hookName: String) {
+        guard let idx = hooks.firstIndex(where: { $0.name == hookName }) else { return }
+        // Stop infrastructure first
+        if let src = fileWatchSources.removeValue(forKey: hookName) { src.cancel() }
+        if let t   = scheduleTimers.removeValue(forKey: hookName)   { t.invalidate() }
+        if let d   = dailyTimers.removeValue(forKey: hookName)      { d.cancel() }
+        dailySchedules.removeValue(forKey: hookName)
+        hooks.remove(at: idx)
+        save()
+    }
+
+    // MARK: - Save helper
+
+    func save() {
+        let file    = HooksFile(hooks: hooks)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(file) {
+            try? data.write(to: Self.configURL, options: .atomic)
+        }
+    }
+
     // MARK: - Toggle
 
     /// Enable or disable a hook by name, persisting to hooks.json and
@@ -363,14 +408,7 @@ final class HooksEngine: ObservableObject {
     func setEnabled(_ hookName: String, enabled: Bool) {
         guard let idx = hooks.firstIndex(where: { $0.name == hookName }) else { return }
         hooks[idx].enabled = enabled
-
-        // Persist
-        let file = HooksFile(hooks: hooks)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(file) {
-            try? data.write(to: Self.configURL, options: .atomic)
-        }
+        save()
 
         let hook = hooks[idx]
         if enabled {

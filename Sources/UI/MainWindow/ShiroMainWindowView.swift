@@ -491,8 +491,7 @@ struct ChatWorkspace: View {
     let showAgents: Bool
     let showTools:  Bool
 
-    @State private var inputText:    String = ""
-    @State private var isTyping:     Bool   = false
+    @State private var inputText:     String = ""
     @State private var currentSendId: UUID? = nil
     @FocusState private var inputFocused: Bool
 
@@ -519,7 +518,7 @@ struct ChatWorkspace: View {
                                     ChatMessageRow(message: msg)
                                         .id(msg.id)
                                 }
-                                if isTyping {
+                                if appState.isTypingMain {
                                     TypingDots()
                                         .padding(.leading, 56)
                                         .padding(.top, 4)
@@ -533,7 +532,7 @@ struct ChatWorkspace: View {
                     .onChange(of: messages.count) { _, _ in
                         withAnimation { proxy.scrollTo(messages.last?.id) }
                     }
-                    .onChange(of: isTyping) { _, v in
+                    .onChange(of: appState.isTypingMain) { _, v in
                         if v { withAnimation { proxy.scrollTo("typing-indicator") } }
                     }
                 }
@@ -625,9 +624,9 @@ struct ChatWorkspace: View {
                 Button {
                     appState.agentCoordinator?.bridge?.interrupt(sessionKey: "main")
                     appState.acpBridge?.interrupt(sessionKey: "main")
-                    appState.isProcessing = false
-                    appState.agentStatus  = .idle
-                    isTyping              = false
+                    appState.isProcessing  = false
+                    appState.agentStatus   = .idle
+                    appState.isTypingMain  = false
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "stop.circle.fill")
@@ -823,9 +822,9 @@ struct ChatWorkspace: View {
         Button {
             appState.agentCoordinator?.bridge?.interrupt(sessionKey: "main")
             appState.acpBridge?.interrupt(sessionKey: "main")
-            appState.isProcessing = false
-            appState.agentStatus  = .idle
-            isTyping              = false
+            appState.isProcessing  = false
+            appState.agentStatus   = .idle
+            appState.isTypingMain  = false
         } label: {
             Image(systemName: "stop.fill")
                 .font(.system(size: 14, weight: .semibold))
@@ -906,9 +905,9 @@ struct ChatWorkspace: View {
         }
 
         appState.conversationMessages.append(DisplayMessage(role: .assistant, content: ""))
-        isTyping              = true
-        appState.isProcessing = true
-        appState.agentStatus  = .thinking
+        appState.isTypingMain  = true
+        appState.isProcessing  = true
+        appState.agentStatus   = .thinking
 
         let reqId = UUID()
         currentSendId = reqId
@@ -922,7 +921,7 @@ struct ChatWorkspace: View {
 
         coordinator.onTurnComplete = { [weak appState] _ in
             Task { @MainActor in
-                isTyping               = false
+                appState?.isTypingMain = false
                 appState?.isProcessing = false
                 appState?.agentStatus  = .idle
                 coordinator.onStreamingToken = nil
@@ -935,9 +934,10 @@ struct ChatWorkspace: View {
             do {
                 _ = try await coordinator.send(query: queryText, systemPrompt: systemPromptOverride)
             } catch {
-                isTyping              = false
-                appState.isProcessing = false
-                appState.agentStatus  = .error(error.localizedDescription)
+                appState.isTypingMain  = false
+                appState.isProcessing  = false
+                appState.agentStatus   = .error(error.localizedDescription)
+                appState.logError(source: "agent", message: error.localizedDescription)
                 if appState.conversationMessages.last?.role == .assistant {
                     let idx = appState.conversationMessages.indices.last!
                     appState.conversationMessages[idx].content = "❌ \(error.localizedDescription)"
@@ -1311,6 +1311,7 @@ private struct ToolFeedRow: View {
 
 struct RoutinesView: View {
     @EnvironmentObject var appState: AppState
+    @State private var showingNewRoutine = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1320,7 +1321,7 @@ struct RoutinesView: View {
                     Text("Routines")
                         .font(.system(size: 20, weight: .semibold))
                         .foregroundColor(Color.vText)
-                    Text("Automated triggers — edit ~/.shiro/hooks.json to add new ones")
+                    Text("Automated triggers — create via + or edit ~/.shiro/hooks.json")
                         .font(.system(size: 12))
                         .foregroundColor(Color.vMuted)
                 }
@@ -1333,6 +1334,16 @@ struct RoutinesView: View {
                         .foregroundColor(Color.vAccent)
                 }
                 .buttonStyle(.plain)
+
+                Button {
+                    showingNewRoutine = true
+                } label: {
+                    Label("New Routine", systemImage: "plus.circle.fill")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Color.vAccent)
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, 12)
             }
             .padding(.horizontal, 28)
             .padding(.vertical, 24)
@@ -1340,14 +1351,31 @@ struct RoutinesView: View {
             Divider().background(Color.vBorder).padding(.horizontal, 20)
 
             if let engine = appState.hooksEngine {
-                ScrollView(.vertical, showsIndicators: false) {
-                    LazyVStack(spacing: 10) {
-                        ForEach(engine.hooks) { hook in
-                            RoutineCard(hook: hook, engine: engine)
-                        }
+                if engine.hooks.isEmpty {
+                    VStack(spacing: 12) {
+                        Spacer()
+                        Image(systemName: "clock.arrow.2.circlepath")
+                            .font(.system(size: 36))
+                            .foregroundColor(Color.vDim)
+                        Text("No routines yet")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(Color.vMuted)
+                        Text("Tap + New Routine to create your first automated trigger")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color.vDim)
+                        Spacer()
                     }
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 20)
+                    .frame(maxWidth: .infinity)
+                } else {
+                    ScrollView(.vertical, showsIndicators: false) {
+                        LazyVStack(spacing: 10) {
+                            ForEach(engine.hooks) { hook in
+                                RoutineCard(hook: hook, engine: engine)
+                            }
+                        }
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 20)
+                    }
                 }
             } else {
                 Spacer()
@@ -1356,6 +1384,227 @@ struct RoutinesView: View {
             }
         }
         .background(Color.vBg)
+        .sheet(isPresented: $showingNewRoutine) {
+            if let engine = appState.hooksEngine {
+                NewRoutineSheet(engine: engine, isPresented: $showingNewRoutine)
+                    .environmentObject(appState)
+            }
+        }
+    }
+}
+
+// MARK: - New Routine Sheet
+
+private struct NewRoutineSheet: View {
+    let engine:      HooksEngine
+    @Binding var isPresented: Bool
+
+    // Fields
+    @State private var name:         String = ""
+    @State private var hookType:     String = "schedule"
+    @State private var path:         String = ""
+    @State private var schedule:     String = "09:00"
+    @State private var description:  String = ""
+    @State private var actionType:   String = "query"
+    @State private var actionQuery:  String = ""
+    @State private var actionSkill:  String = ""
+    @State private var actionPath:   String = ""
+    @State private var actionCorpus: String = "docs"
+    @State private var enabled:      Bool   = true
+    @State private var errorMsg:     String? = nil
+
+    private let hookTypes   = ["schedule", "file_watch", "app_launch"]
+    private let actionTypes = ["query", "skill", "ingest"]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("New Routine")
+                    .font(ShiroFont.serif(size: 18, weight: .semibold))
+                    .foregroundColor(Color.vText)
+                Spacer()
+                Button("Cancel") { isPresented = false }
+                    .buttonStyle(.plain)
+                    .foregroundColor(Color.vMuted)
+                Button("Create") { create() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.vAccent)
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .padding(.horizontal, 28)
+            .padding(.top, 24)
+            .padding(.bottom, 20)
+
+            Divider().background(Color.vBorder)
+
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 22) {
+
+                    // Basic info
+                    group("Basics") {
+                        field("Name", hint: "e.g. daily-brief") { TextField("", text: $name).textFieldStyle(.roundedBorder) }
+                        field("Description (optional)") { TextField("", text: $description).textFieldStyle(.roundedBorder) }
+                        Toggle("Enabled", isOn: $enabled).tint(Color.vAccent)
+                    }
+
+                    // Trigger
+                    group("Trigger") {
+                        Picker("Type", selection: $hookType) {
+                            ForEach(hookTypes, id: \.self) { t in
+                                Text(hookTypeLabel(t)).tag(t)
+                            }
+                        }
+                        .pickerStyle(.radioGroup)
+
+                        if hookType == "schedule" {
+                            field("Schedule", hint: "HH:MM for daily (e.g. 09:00) or every:N for interval (e.g. every:30)") {
+                                TextField("09:00", text: $schedule).textFieldStyle(.roundedBorder)
+                            }
+                        } else if hookType == "file_watch" {
+                            field("Watch path", hint: "~/path/to/file or directory") {
+                                TextField("~/Documents/notes.md", text: $path).textFieldStyle(.roundedBorder)
+                            }
+                        }
+                    }
+
+                    // Action
+                    group("Action") {
+                        Picker("Action type", selection: $actionType) {
+                            ForEach(actionTypes, id: \.self) { t in
+                                Text(actionTypeLabel(t)).tag(t)
+                            }
+                        }
+                        .pickerStyle(.radioGroup)
+
+                        switch actionType {
+                        case "query":
+                            field("Message to send", hint: "Text sent to Shiro as if you typed it") {
+                                TextEditor(text: $actionQuery)
+                                    .font(ShiroFont.ui(size: 13))
+                                    .frame(minHeight: 72)
+                                    .padding(6)
+                                    .background(Color.vSurface)
+                                    .cornerRadius(8)
+                            }
+                        case "skill":
+                            field("Skill name", hint: "e.g. daily-brief") {
+                                TextField("", text: $actionSkill).textFieldStyle(.roundedBorder)
+                            }
+                        case "ingest":
+                            field("Path to ingest", hint: "~/path/to/file or directory") {
+                                TextField("~/Projects", text: $actionPath).textFieldStyle(.roundedBorder)
+                            }
+                            field("Corpus tag", hint: "e.g. docs, code, notes") {
+                                TextField("docs", text: $actionCorpus).textFieldStyle(.roundedBorder)
+                            }
+                        default:
+                            EmptyView()
+                        }
+                    }
+
+                    if let err = errorMsg {
+                        HStack(spacing: 7) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(Color.vRed)
+                                .font(.system(size: 12))
+                            Text(err)
+                                .font(.system(size: 12))
+                                .foregroundColor(Color.vRed)
+                        }
+                        .padding(12)
+                        .background(Color.vRed.opacity(0.08))
+                        .cornerRadius(8)
+                    }
+                }
+                .padding(.horizontal, 28)
+                .padding(.vertical, 24)
+            }
+        }
+        .frame(width: 520, height: 640)
+        .background(Color.vBg)
+    }
+
+    // MARK: Helpers
+
+    private func group<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title.uppercased())
+                .font(ShiroFont.mono(size: 9.5))
+                .foregroundColor(Color.vDim)
+                .tracking(1.4)
+            content()
+        }
+    }
+
+    private func field<Content: View>(_ label: String, hint: String? = nil, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label)
+                .font(ShiroFont.ui(size: 12, weight: .medium))
+                .foregroundColor(Color.vMuted)
+            content()
+            if let hint {
+                Text(hint)
+                    .font(ShiroFont.ui(size: 10.5))
+                    .foregroundColor(Color.vDim)
+            }
+        }
+    }
+
+    private func hookTypeLabel(_ t: String) -> String {
+        switch t {
+        case "schedule":   return "Schedule (time-based)"
+        case "file_watch": return "File Watch (on file change)"
+        case "app_launch": return "App Launch (once at startup)"
+        default:           return t
+        }
+    }
+
+    private func actionTypeLabel(_ t: String) -> String {
+        switch t {
+        case "query":  return "Send message (text query to Shiro)"
+        case "skill":  return "Run skill (invoke a /skill by name)"
+        case "ingest": return "Ingest path (add files to memory)"
+        default:       return t
+        }
+    }
+
+    private func create() {
+        let trimmedName = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmedName.isEmpty else { errorMsg = "Name is required."; return }
+
+        let action: HooksEngine.HookAction
+        switch actionType {
+        case "skill":
+            let s = actionSkill.trimmingCharacters(in: .whitespaces)
+            guard !s.isEmpty else { errorMsg = "Skill name is required."; return }
+            action = HooksEngine.HookAction(type: "skill", skill: s, args: nil, query: nil, path: nil, corpus: nil)
+        case "ingest":
+            let p = actionPath.trimmingCharacters(in: .whitespaces)
+            guard !p.isEmpty else { errorMsg = "Ingest path is required."; return }
+            let c = actionCorpus.trimmingCharacters(in: .whitespaces)
+            action = HooksEngine.HookAction(type: "ingest", skill: nil, args: nil, query: nil, path: p, corpus: c.isEmpty ? "docs" : c)
+        default: // query
+            let q = actionQuery.trimmingCharacters(in: .whitespaces)
+            guard !q.isEmpty else { errorMsg = "Message text is required."; return }
+            action = HooksEngine.HookAction(type: "query", skill: nil, args: nil, query: q, path: nil, corpus: nil)
+        }
+
+        let hook = HooksEngine.Hook(
+            name:        trimmedName,
+            type:        hookType,
+            path:        hookType == "file_watch" ? (path.isEmpty ? nil : path) : nil,
+            schedule:    hookType == "schedule"   ? (schedule.isEmpty ? "09:00" : schedule) : nil,
+            action:      action,
+            enabled:     enabled,
+            description: description.isEmpty ? nil : description
+        )
+
+        if let err = engine.appendHook(hook) {
+            errorMsg = err
+        } else {
+            isPresented = false
+        }
     }
 }
 
@@ -1395,14 +1644,26 @@ private struct RoutineCard: View {
                 }
             }
 
-            // Enable toggle
-            Toggle("", isOn: Binding(
-                get: { hook.enabled },
-                set: { engine.setEnabled(hook.name, enabled: $0) }
-            ))
-            .toggleStyle(.switch)
-            .scaleEffect(0.85)
-            .tint(Color.vAccent)
+            VStack(spacing: 6) {
+                // Enable toggle
+                Toggle("", isOn: Binding(
+                    get: { hook.enabled },
+                    set: { engine.setEnabled(hook.name, enabled: $0) }
+                ))
+                .toggleStyle(.switch)
+                .scaleEffect(0.85)
+                .tint(Color.vAccent)
+
+                // Delete
+                Button(role: .destructive) {
+                    engine.deleteHook(named: hook.name)
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11))
+                        .foregroundColor(Color.vRed.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(16)
         .background(Color.vSurface)

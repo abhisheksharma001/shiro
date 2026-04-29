@@ -47,6 +47,14 @@ final class AppState: ObservableObject {
     // MARK: - Forecast Mode
     @Published var forecastModeEnabled: Bool = UserDefaults.standard.object(forKey: "forecastModeEnabled") as? Bool ?? false
 
+    // MARK: - Typing indicator (shared between floating bar + main window)
+    /// True while the agent is streaming a response. Both views observe this
+    /// instead of maintaining separate @State booleans that can desync.
+    @Published var isTypingMain: Bool = false
+
+    // MARK: - Error Log
+    @Published var errorLog: [ErrorLogItem] = []
+
     // MARK: - Tool Activity Feed (live append from bridge events)
     @Published var toolActivityFeed:   [ToolActivityItem] = []
 
@@ -165,7 +173,7 @@ final class AppState: ObservableObject {
                 }
             } else {
                 bridgeStatus = .offline(reason: "No usable backend found — check Settings → Route")
-                errorMessage = "No LLM backend available. Open Settings → Route to configure."
+                logError(source: "router", message: "No LLM backend available. Open Settings → Route to configure.")
             }
 
             // 9. MCP Registry
@@ -208,9 +216,8 @@ final class AppState: ObservableObject {
             print("[Shiro] ✅ Initialized — route: \(mode.rawValue), LM Studio: \(lmStudioConnected)")
 
         } catch {
-            self.errorMessage = "Init failed: \(error.localizedDescription)"
             self.bridgeStatus = .offline(reason: error.localizedDescription)
-            print("[Shiro] ❌ Init error: \(error)")
+            logError(source: "init", message: "Init failed: \(error.localizedDescription)")
         }
     }
 
@@ -290,11 +297,11 @@ final class AppState: ObservableObject {
                 monitor.attach(to: router, mode: newMode)
                 print("[Shiro] ✅ Switched to \(newMode.displayName)")
             } catch {
-                errorMessage = "Switch to \(newMode.displayName) failed: \(error.localizedDescription)"
+                logError(source: "router", message: "Switch to \(newMode.displayName) failed: \(error.localizedDescription)")
                 bridgeStatus = .offline(reason: error.localizedDescription)
             }
         } else {
-            errorMessage = "\(newMode.displayName) prerequisites missing"
+            logError(source: "router", message: "\(newMode.displayName) prerequisites missing")
             bridgeStatus = .offline(reason: "prerequisites missing for \(newMode.rawValue)")
         }
     }
@@ -407,6 +414,17 @@ final class AppState: ObservableObject {
 
     // MARK: - Tool Activity
 
+    // MARK: - Error Logging
+
+    /// Append a structured error entry. Capped at 500 entries.
+    func logError(source: String, message: String) {
+        let item = ErrorLogItem(source: source, message: message)
+        errorLog.append(item)
+        errorMessage = message                          // keep legacy banner too
+        if errorLog.count > 500 { errorLog.removeFirst(errorLog.count - 500) }
+        print("[Shiro] ❌ [\(source)] \(message)")
+    }
+
     func appendToolActivity(_ item: ToolActivityItem) {
         toolActivityFeed.append(item)
         // Cap feed at 200 items
@@ -429,6 +447,7 @@ final class AppState: ObservableObject {
             agentCoordinator?.onTurnComplete   = nil
         }
         isProcessing          = false
+        isTypingMain          = false
         agentStatus           = .idle
         conversationMessages.removeAll()
         toolActivityFeed.removeAll()
@@ -539,6 +558,15 @@ enum SubAgentDisplayStyle: String, CaseIterable {
         case .tree:   return "Tree View"
         }
     }
+}
+
+// MARK: - Error Log Item
+
+struct ErrorLogItem: Identifiable {
+    let id        = UUID()
+    let timestamp = Date()
+    let source:    String   // e.g. "init", "bridge", "router"
+    let message:   String
 }
 
 // MARK: - Errors

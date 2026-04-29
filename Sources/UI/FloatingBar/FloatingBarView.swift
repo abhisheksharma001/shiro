@@ -74,8 +74,7 @@ enum ShiroFont {
 
 struct FloatingBarView: View {
     @EnvironmentObject var appState: AppState
-    @State private var inputText:   String = ""
-    @State private var isTyping:    Bool   = false
+    @State private var inputText:    String = ""
     @State private var currentSendId: UUID? = nil
     @FocusState private var inputFocused: Bool
 
@@ -221,7 +220,7 @@ struct FloatingBarView: View {
                             MessageBubble(message: msg)
                                 .id(msg.id)
                         }
-                        if isTyping {
+                        if appState.isTypingMain {
                             TypingDots()
                                 .padding(.leading, 16)
                                 .id("typing-indicator")
@@ -234,7 +233,7 @@ struct FloatingBarView: View {
                 .onChange(of: messages.count) { _, _ in
                     withAnimation { proxy.scrollTo(messages.last?.id) }
                 }
-                .onChange(of: isTyping) { _, v in
+                .onChange(of: appState.isTypingMain) { _, v in
                     if v { withAnimation { proxy.scrollTo("typing-indicator") } }
                 }
             }
@@ -399,7 +398,7 @@ struct FloatingBarView: View {
 
         // Streaming assistant bubble (empty — fills via token callbacks)
         appState.conversationMessages.append(DisplayMessage(role: .assistant, content: ""))
-        isTyping             = true
+        appState.isTypingMain = true
         appState.isProcessing = true
         appState.agentStatus  = .thinking
         withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
@@ -418,7 +417,7 @@ struct FloatingBarView: View {
 
         coordinator.onTurnComplete = { [weak appState] _ in
             Task { @MainActor in
-                isTyping               = false    // @State, safe on main actor
+                appState?.isTypingMain = false
                 appState?.isProcessing = false
                 appState?.agentStatus  = .idle
                 coordinator.onStreamingToken = nil
@@ -431,9 +430,10 @@ struct FloatingBarView: View {
             do {
                 _ = try await coordinator.send(query: queryText, systemPrompt: systemPromptOverride)
             } catch {
-                isTyping                   = false
-                appState.isProcessing      = false
-                appState.agentStatus       = .error(error.localizedDescription)
+                appState.isTypingMain          = false
+                appState.isProcessing          = false
+                appState.agentStatus           = .error(error.localizedDescription)
+                appState.logError(source: "agent", message: error.localizedDescription)
                 if appState.conversationMessages.last?.role == .assistant {
                     let idx = appState.conversationMessages.indices.last!
                     appState.conversationMessages[idx].content = "❌ \(error.localizedDescription)"
@@ -445,9 +445,9 @@ struct FloatingBarView: View {
     private func stopProcessing() {
         appState.agentCoordinator?.bridge?.interrupt(sessionKey: "main")
         appState.acpBridge?.interrupt(sessionKey: "main")
-        appState.isProcessing = false
-        appState.agentStatus  = .idle
-        isTyping              = false
+        appState.isProcessing  = false
+        appState.agentStatus   = .idle
+        appState.isTypingMain  = false
     }
 
     private func checkConnectivity() {
@@ -614,8 +614,11 @@ struct SettingsView: View {
             UIPrefsTab()
                 .tabItem { Label("Layout", systemImage: "rectangle.3.group") }
                 .tag(4)
+            ErrorLogTab()
+                .tabItem { Label("Error Log", systemImage: "exclamationmark.triangle.fill") }
+                .tag(5)
         }
-        .frame(width: 580, height: 520)
+        .frame(width: 580, height: 560)
         .padding(8)
         .environmentObject(appState)
     }
@@ -763,6 +766,7 @@ private struct APIKeysTab: View {
     @State private var composioKey:    String = KeychainHelper.get(.composioAPIKey)    ?? ""
     @State private var githubToken:    String = KeychainHelper.get(.githubToken)       ?? ""
     @State private var hfToken:        String = KeychainHelper.get(.huggingFaceToken)  ?? ""
+    @State private var pagegridKey:    String = KeychainHelper.get(.pagegridAPIKey)    ?? ""
     @State private var saved = false
 
     var body: some View {
@@ -813,6 +817,17 @@ private struct APIKeysTab: View {
                          destination: URL(string: "https://huggingface.co/settings/tokens")!)
                         .font(.system(size: 11))
                 }
+                Section("PageGrid  ▸  AI documentation search") {
+                    SecureTextField("sk-pgrid-…", text: $pagegridKey)
+                    Link("Docs at pagegrid.in/docs",
+                         destination: URL(string: "https://pagegrid.in/docs")!)
+                        .font(.system(size: 11))
+                    if !pagegridKey.isEmpty {
+                        Text(pagegridKey.hasPrefix("sk-pgrid-") ? "✅ Valid format" : "⚠️ Expected sk-pgrid- prefix")
+                            .font(.system(size: 11))
+                            .foregroundColor(pagegridKey.hasPrefix("sk-pgrid-") ? .green : .orange)
+                    }
+                }
                 Section {
                     HStack {
                         Spacer()
@@ -840,6 +855,7 @@ private struct APIKeysTab: View {
         KeychainHelper.set(composioKey,    for: .composioAPIKey)
         KeychainHelper.set(githubToken,    for: .githubToken)
         KeychainHelper.set(hfToken,        for: .huggingFaceToken)
+        KeychainHelper.set(pagegridKey,    for: .pagegridAPIKey)
         saved = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { saved = false }
     }
@@ -857,6 +873,93 @@ private struct SecureTextField: View {
             Button { isVisible.toggle() } label: {
                 Image(systemName: isVisible ? "eye.slash" : "eye").foregroundColor(.secondary)
             }.buttonStyle(.plain)
+        }
+    }
+}
+
+// MARK: Error Log tab
+
+private struct ErrorLogTab: View {
+    @EnvironmentObject var appState: AppState
+
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("\(appState.errorLog.count) error\(appState.errorLog.count == 1 ? "" : "s")")
+                    .font(.custom("JetBrains Mono", size: 11))
+                    .foregroundColor(.secondary)
+                Spacer()
+                if !appState.errorLog.isEmpty {
+                    Button("Clear") { appState.errorLog.removeAll() }
+                        .font(.system(size: 11))
+                        .foregroundColor(.red)
+                        .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            if appState.errorLog.isEmpty {
+                Spacer()
+                HStack {
+                    Spacer()
+                    VStack(spacing: 8) {
+                        Image(systemName: "checkmark.shield.fill")
+                            .font(.system(size: 28))
+                            .foregroundColor(.green.opacity(0.6))
+                        Text("No errors recorded")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                Spacer()
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: true) {
+                        LazyVStack(alignment: .leading, spacing: 1) {
+                            ForEach(appState.errorLog.reversed()) { item in
+                                HStack(alignment: .top, spacing: 10) {
+                                    Text(Self.timeFormatter.string(from: item.timestamp))
+                                        .font(.custom("JetBrains Mono", size: 10))
+                                        .foregroundColor(.secondary)
+                                        .frame(width: 56, alignment: .leading)
+
+                                    Text("[\(item.source)]")
+                                        .font(.custom("JetBrains Mono", size: 10))
+                                        .foregroundColor(Color(hex: "#D97757"))
+                                        .frame(minWidth: 60, alignment: .leading)
+
+                                    Text(item.message)
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.primary)
+                                        .textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
+
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color(hex: "#1A1916").opacity(0.5))
+                                .id(item.id)
+                            }
+                        }
+                    }
+                    .onChange(of: appState.errorLog.count) { _, _ in
+                        if let last = appState.errorLog.last {
+                            withAnimation { proxy.scrollTo(last.id) }
+                        }
+                    }
+                }
+            }
         }
     }
 }

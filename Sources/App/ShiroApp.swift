@@ -17,7 +17,9 @@ struct ShiroApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var floatingBarController: FloatingBarWindowController?
-    private var statusItem: NSStatusItem?
+    private var statusItem:            NSStatusItem?
+    private var globalKeyMonitor:      Any?
+    private var localKeyMonitor:       Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide from dock — we live in menu bar + floating panel + full window
@@ -25,8 +27,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupMenuBarIcon()
         setupFloatingBar()
+        setupHotkey()
 
         Task { await AppState.shared.initialize() }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if let g = globalKeyMonitor { NSEvent.removeMonitor(g); globalKeyMonitor = nil }
+        if let l = localKeyMonitor  { NSEvent.removeMonitor(l); localKeyMonitor  = nil }
     }
 
     // MARK: - Menu bar
@@ -39,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         menu.addItem(menuItem("Open Shiro Workspace",   action: #selector(openMainWindow),  key: ""))
-        menu.addItem(menuItem("Show floating bar",      action: #selector(showFloatingBar), key: ""))
+        menu.addItem(menuItem("Show/Hide floating bar",  action: #selector(showFloatingBar), key: "."))
         menu.addItem(.separator())
         menu.addItem(menuItem("Preferences…",           action: #selector(openPreferences), key: ","))
         menu.addItem(.separator())
@@ -60,6 +68,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         floatingBarController?.showWindow(nil)
     }
 
+    // MARK: - ⌘. hotkey — show/hide floating bar from anywhere
+
+    private func setupHotkey() {
+        // keyCode 47 = Period (".")
+        let handler: (NSEvent) -> Void = { [weak self] event in
+            guard event.modifierFlags.contains(.command),
+                  event.keyCode == 47 else { return }
+            self?.toggleFloatingBar()
+        }
+
+        // Global monitor fires even when Shiro is not the frontmost app.
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler)
+
+        // Local monitor fires when the floating panel or main window is key.
+        // Returns nil to consume the event so it doesn't propagate as a "." character.
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.modifierFlags.contains(.command) && event.keyCode == 47 {
+                self.toggleFloatingBar()
+                return nil
+            }
+            return event
+        }
+    }
+
+    private func toggleFloatingBar() {
+        guard let window = floatingBarController?.window else { return }
+        if window.isVisible {
+            window.orderOut(nil)
+        } else {
+            floatingBarController?.showWindow(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
     // MARK: - Actions
 
     @objc private func openMainWindow() {
@@ -67,8 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showFloatingBar() {
-        floatingBarController?.showWindow(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        toggleFloatingBar()
     }
 
     @objc private func openPreferences() {

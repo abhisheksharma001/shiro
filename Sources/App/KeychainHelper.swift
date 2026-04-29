@@ -20,6 +20,8 @@ enum KeychainHelper {
         case composioAPIKey    = "composio_api_key"
         case githubToken       = "github_personal_access_token"
         case huggingFaceToken  = "huggingface_token"
+        // PageGrid — AI documentation search service
+        case pagegridAPIKey    = "pagegrid_api_key"
     }
 
     // MARK: - Read / Write / Delete
