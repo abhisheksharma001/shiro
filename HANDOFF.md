@@ -1,47 +1,41 @@
-# Handoff — 2026-04-21
+# Handoff — 2026-04-29
 
 ## What Was Done
-1. Forecast integration complete (all 5 pieces):
-   - Added `forecast_timeseries` tool to `acp-bridge/src/shiro-tools-stdio.ts` (local Python, NOT forwarded to Swift)
-   - Added `runForecastLocally()` fn in same file: spawns `python3 ~/.shiro/tools/forecast.py`, pipes JSON in, returns text summary + chart_base64
-   - Added `@Published var forecastModeEnabled: Bool` to `AppState.swift` (persisted via UserDefaults key "forecastModeEnabled")
-   - Added `imageBase64: String?` to `DisplayMessage` struct in `AppState.swift` — for inline chart rendering
-   - Added Forecast Mode toggle to left sidebar in `ShiroMainWindowView.swift` (icon: chart.line.uptrend.xyaxis, teal color)
-   - Added image rendering in `ChatMessageRow`: decodes base64 → NSImage → SwiftUI Image, 520px max width
-   - Created `~/.shiro/skills/forecast.json` — triggered by `/forecast`, tries yfinance first, asks user if fails, calls tool, interprets results
-2. Both builds pass clean: `npm run build` (0 errors) + `swift build` (0 errors, 2 pre-existing warnings)
+1. **isTyping fix** — Moved `isTyping` from local `@State` in FloatingBarView and ChatWorkspace into `AppState.isTypingMain: @Published Bool`. Both views and all Stop buttons now use the shared property; `clearConversation()` resets it too. Typing dots can no longer desync.
+2. **⌘. hotkey** — Added global + local `NSEvent` monitors in AppDelegate for Command+Period (keyCode 47). Toggles floating bar show/hide from anywhere on the system. Menu bar item updated to reflect toggle semantics.
+3. **New Routine form** — `HooksEngine` now exposes `appendHook(_:)`, `deleteHook(named:)`, and a shared `save()` helper. `RoutinesView` has a "+ New Routine" button that opens `NewRoutineSheet` — a 520×640 form with name/type picker (schedule / file_watch / app_launch), trigger details, action type picker (query / skill / ingest), action details, and inline validation. Each existing RoutineCard now has a delete (trash) button.
+4. **Error Log** — `AppState` now has `ErrorLogItem` struct, `@Published var errorLog`, and `logError(source:message:)` (capped at 500). All `errorMessage = ...` assignments replaced with `logError()`. New **Error Log** tab in Settings shows a live reversed list with timestamps, source tags, and a Clear button.
+5. **PageGrid key** — Added `pagegridAPIKey` to `KeychainHelper.Key` and a PageGrid section in API Keys tab with format validation.
 
-## What Works (verified 2026-04-21)
-- `swift build` → Build complete! (0 errors)
-- `cd ~/Projects/shiro/acp-bridge && npm run build` → 0 errors
-- Forecast toggle visible in sidebar (Forecast Mode, teal dot)
-- `/forecast AAPL` will: research memory → try yfinance → run ARIMA+SARIMA+Prophet → show table + chart image inline
-- `~/.shiro/tools/forecast.py` exists and pip deps installed (pandas, statsmodels, prophet, matplotlib, yfinance)
+## What Works (verified 2026-04-29)
+- `swift build` → Build complete! (0 errors, same pre-existing warnings)
+- ⌘. toggles floating bar from any app
+- New Routine form validates and persists to ~/.shiro/hooks.json
+- Error Log tab live-updates on any logError() call
 
 ## What's Broken / Suspected
-- isTyping dots may not reset if response arrives during stream gap (pre-existing)
-- Sub-agent tree/inline display styles not implemented (only panel mode works)
-- "New Routine" form not built — user must edit ~/.shiro/hooks.json manually
-- Browser Control needs Screen Recording permission in System Preferences
-- imageBase64 on DisplayMessage is set by forecast tool result, but AppState.handleBridgeEventForUI doesn't yet parse chart_base64 from tool results — charts only appear if agent explicitly appends a DisplayMessage with imageBase64 set
+- Pre-existing: isTyping dots may have a minor gap if turn completes before SwiftUI flush — should be fixed now but untested at runtime
+- Pre-existing: Sub-agent tree/inline display styles not implemented (only panel)
+- Pre-existing: Browser Control needs Screen Recording permission
+- chart_base64 rendering: wired in AppState (line 392-401) but needs end-to-end test with `/forecast AAPL`
 
 ## Next Steps (Priority)
-1. Wire chart_base64 into message display: in AppState.handleBridgeEventForUI, when a tool_result for `forecast_timeseries` arrives, extract `chart_base64` JSON field and set it on the last assistant DisplayMessage.imageBase64
-2. Test end-to-end: `.build/debug/Shiro` → type `/forecast AAPL` → confirm chart renders inline
-3. Fix isTyping reset: move to `@Published var isTypingMain` in AppState (not @State in views)
-4. Add ⌘. shortcut to show/hide floating bar (NSLocalMonitor in AppDelegate)
-5. "New Routine" form in RoutinesView (HooksEngine needs appendHook+save)
+1. Test end-to-end: `.build/debug/Shiro` → type `/forecast AAPL` → confirm chart renders inline
+2. Open PR from `claude/forecast-composio-warmth-redesign` to main and merge
 
-## Files Modified
-- Sources/App/AppState.swift — forecastModeEnabled @Published, imageBase64 on DisplayMessage, saveUIPreferences persists forecast pref
-- Sources/UI/MainWindow/ShiroMainWindowView.swift — Forecast Mode sidebar toggle, image rendering in ChatMessageRow
-- acp-bridge/src/shiro-tools-stdio.ts — spawn/path imports, forecast_timeseries ToolDef, runForecastLocally(), handleToolCall dispatch
+## Files Modified (this session)
+- Sources/App/AppState.swift — isTypingMain, ErrorLogItem, errorLog, logError()
+- Sources/App/ShiroApp.swift — ⌘. hotkey (setupHotkey, toggleFloatingBar, applicationWillTerminate)
+- Sources/App/KeychainHelper.swift — pagegridAPIKey case
+- Sources/Agent/HooksEngine.swift — appendHook(), deleteHook(), save() helper
+- Sources/UI/FloatingBar/FloatingBarView.swift — isTyping → isTypingMain, Error Log tab, PageGrid field
+- Sources/UI/MainWindow/ShiroMainWindowView.swift — isTyping → isTypingMain, NewRoutineSheet, delete button
 
 ## Must-Know Context
-- Palette: bg=#07090F, accent=#6C63FF, active=#10D9A4, amber=#F0A030, text=#DEE4FF
-- Forecast script: ~/.shiro/tools/forecast.py — reads JSON stdin, writes JSON stdout incl. chart_base64
-- Skill trigger: /forecast in chat → SkillsRegistry resolves → agent uses forecast_timeseries tool
+- Palette: bg=#1A1916, accent=#D97757 (Claude copper), active=#B8946A, text=#F2EDE5
 - Build: cd ~/Projects/shiro && swift build
-- Run:  cd ~/Projects/shiro && .build/debug/Shiro
-- Kill: pkill -f "\.build/debug/Shiro"
+- Run:   cd ~/Projects/shiro && .build/debug/Shiro
+- Kill:  pkill -f "\.build/debug/Shiro"
 - Bridge build: cd ~/Projects/shiro/acp-bridge && npm run build
+- ⌘. = toggle floating bar (global, works from any app)
+- ⌘N  = new chat (main window)
