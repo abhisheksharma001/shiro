@@ -74,8 +74,9 @@ enum ShiroFont {
 
 struct FloatingBarView: View {
     @EnvironmentObject var appState: AppState
-    @State private var inputText:    String = ""
-    @State private var currentSendId: UUID? = nil
+    @State private var inputText:      String = ""
+    @State private var currentSendId:  UUID?  = nil
+    @State private var showPalette:    Bool   = false
     @FocusState private var inputFocused: Bool
 
     // Computed alias into shared conversation
@@ -89,6 +90,24 @@ struct FloatingBarView: View {
 
     var body: some View {
         VStack(spacing: 8) {
+            // ⌘K command palette overlay
+            if showPalette {
+                CommandPaletteView(appState: appState, isShown: $showPalette) { selected in
+                    inputText = selected
+                    showPalette = false
+                    inputFocused = true
+                }
+                .transition(.asymmetric(
+                    insertion: .move(edge: .top).combined(with: .opacity),
+                    removal:   .scale(scale: 0.96).combined(with: .opacity)
+                ))
+            }
+
+            // Veto toasts for medium-risk auto-approved actions
+            if let gate = appState.consentGate, !gate.activeVetoToasts.isEmpty {
+                VetoToastQueue(gate: gate)
+            }
+
             // Approval overlays float above the bar
             if let gate = appState.consentGate, !gate.pendingApprovals.isEmpty {
                 ApprovalQueueOverlay(gate: gate)
@@ -204,6 +223,17 @@ struct FloatingBarView: View {
         }
         .padding(.horizontal, 14)
         .frame(height: 60)
+        .onAppear {
+            NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "k" {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                        showPalette.toggle()
+                    }
+                    return nil
+                }
+                return event
+            }
+        }
     }
 
     // MARK: - Chat Panel (expanded, scrollable)
@@ -1108,6 +1138,8 @@ private struct UIPrefsTab: View {
 
 private struct PoliciesTab: View {
     @EnvironmentObject var appState: AppState
+    @State private var askMediumRisk: Bool = Config.askBeforeMediumRisk
+    @State private var showVetoToast: Bool = Config.showMediumRiskVetoToast
 
     private let amber  = Color(hex: "#FFB800")
     private let green  = Color(hex: "#00FF85")
@@ -1116,6 +1148,62 @@ private struct PoliciesTab: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // ── Risk-tier customization ───────────────────────────────────
+            VStack(alignment: .leading, spacing: 8) {
+                Text("RISK-TIER BEHAVIOR")
+                    .font(.custom("JetBrains Mono", size: 10))
+                    .fontWeight(.bold)
+                    .tracking(0.6)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 10)
+
+                VStack(spacing: 0) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Ask before medium-risk actions")
+                                .font(.system(size: 12))
+                            Text("Show full approval card (same as high-risk). Off = auto-approve.")
+                                .font(.system(size: 10.5))
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $askMediumRisk)
+                            .labelsHidden()
+                            .onChange(of: askMediumRisk) { _, v in Config.askBeforeMediumRisk = v }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+
+                    Divider().padding(.horizontal, 12)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Show 3-second veto toast")
+                                .font(.system(size: 12))
+                                .foregroundColor(askMediumRisk ? .secondary : .primary)
+                            Text("Brief notification with Veto button before auto-approving.")
+                                .font(.system(size: 10.5))
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $showVetoToast)
+                            .labelsHidden()
+                            .disabled(askMediumRisk)
+                            .onChange(of: showVetoToast) { _, v in Config.showMediumRiskVetoToast = v }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
+                .background(Color(hex: "#25221E"))
+                .cornerRadius(8)
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(hex: "#3A3530"), lineWidth: 1))
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
+            }
+
+            Divider()
+
             // Header
             HStack {
                 Text("\(appState.consentGate?.policies.count ?? 0) saved rule\(appState.consentGate?.policies.count == 1 ? "" : "s")")
@@ -1846,6 +1934,221 @@ private struct BudgetTab: View {
         if m.contains("haiku")  { return "haiku" }
         if m.contains("sonnet") { return "sonnet" }
         return String(model.prefix(10))
+    }
+}
+
+// MARK: - Command Palette (⌘K)
+
+private struct CommandEntry: Identifiable {
+    enum Kind { case skill, command, recent }
+    let id = UUID()
+    let kind: Kind
+    let name: String
+    let subtitle: String
+    let insertText: String
+    let icon: String
+}
+
+struct CommandPaletteView: View {
+    let appState: AppState
+    @Binding var isShown: Bool
+    let onSelect: (String) -> Void
+
+    @State private var query: String = ""
+    @State private var selectedIndex: Int = 0
+    @FocusState private var searchFocused: Bool
+
+    private let bg     = Color(hex: "#0D0D0D")
+    private let border = Color(hex: "#3A3530")
+    private let accent = Color(hex: "#D97757")
+    private let muted  = Color(hex: "#5C544C")
+    private let text   = Color(hex: "#F2EDE5")
+
+    private var allEntries: [CommandEntry] {
+        var entries: [CommandEntry] = []
+
+        // Slash commands (built-in)
+        let builtIn: [(String, String, String)] = [
+            ("/code",    "Plan + execute a coding task in VS Code", "code.branch"),
+            ("/multi",   "Multi-subtask coding plan",               "arrow.triangle.branch"),
+            ("/forecast","Generate market charts + analysis",       "chart.xyaxis.line"),
+            ("/research","Deep research with citations",            "magnifyingglass"),
+            ("/ingest",  "Ingest a document into memory",           "doc.badge.plus"),
+            ("/clear",   "Clear conversation history",              "trash"),
+            ("/status",  "Show system status",                      "info.circle"),
+        ]
+        for (cmd, desc, icon) in builtIn {
+            entries.append(CommandEntry(kind: .command, name: cmd, subtitle: desc,
+                                        insertText: cmd + " ", icon: icon))
+        }
+
+        // Skills from registry
+        if let registry = appState.skillsRegistry {
+            for skill in registry.skills {
+                entries.append(CommandEntry(kind: .skill, name: "/\(skill.name)",
+                                            subtitle: skill.description ?? "",
+                                            insertText: "/\(skill.name) ",
+                                            icon: "cpu"))
+            }
+        }
+
+        // Recent prompts (last 5 user messages)
+        let recents = appState.conversationMessages
+            .filter { $0.role == .user }
+            .suffix(5)
+            .map(\.content)
+        for (i, msg) in recents.enumerated() {
+            let short = String(msg.prefix(80))
+            entries.append(CommandEntry(kind: .recent, name: short, subtitle: "Recent",
+                                        insertText: msg, icon: "clock"))
+        }
+
+        return entries
+    }
+
+    private var filtered: [CommandEntry] {
+        guard !query.isEmpty else { return allEntries }
+        let q = query.lowercased()
+        return allEntries.filter {
+            $0.name.lowercased().contains(q) ||
+            $0.subtitle.lowercased().contains(q)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Search bar
+            HStack(spacing: 8) {
+                Image(systemName: "command")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(accent)
+                Text("K")
+                    .font(.custom("JetBrains Mono", size: 11))
+                    .foregroundColor(muted)
+                    .frame(width: 18, height: 18)
+                    .background(Color(hex: "#25221E"))
+                    .cornerRadius(3)
+
+                TextField("Type a command or search…", text: $query)
+                    .font(.custom("JetBrains Mono", size: 12.5))
+                    .foregroundColor(text)
+                    .textFieldStyle(.plain)
+                    .focused($searchFocused)
+                    .onChange(of: query) { _, _ in selectedIndex = 0 }
+                    .onKeyPress(.escape) { isShown = false; return .handled }
+                    .onKeyPress(.return) {
+                        if !filtered.isEmpty {
+                            onSelect(filtered[min(selectedIndex, filtered.count - 1)].insertText)
+                        }
+                        return .handled
+                    }
+                    .onKeyPress(.upArrow) {
+                        if selectedIndex > 0 { selectedIndex -= 1 }
+                        return .handled
+                    }
+                    .onKeyPress(.downArrow) {
+                        if selectedIndex < filtered.count - 1 { selectedIndex += 1 }
+                        return .handled
+                    }
+
+                Spacer()
+
+                // Close hint
+                Text("esc")
+                    .font(.custom("JetBrains Mono", size: 10))
+                    .foregroundColor(muted)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color(hex: "#25221E"))
+                    .cornerRadius(3)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(bg)
+
+            Divider().background(border)
+
+            // Results list
+            if filtered.isEmpty {
+                HStack {
+                    Spacer()
+                    Text("No matches")
+                        .font(.system(size: 11))
+                        .foregroundColor(muted)
+                        .padding(.vertical, 20)
+                    Spacer()
+                }
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(filtered.enumerated()), id: \.element.id) { idx, entry in
+                            PaletteRow(entry: entry, isSelected: idx == selectedIndex)
+                                .onTapGesture { onSelect(entry.insertText) }
+                        }
+                    }
+                }
+                .frame(maxHeight: 240)
+            }
+        }
+        .background(bg)
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(accent.opacity(0.3), lineWidth: 1))
+        .cornerRadius(10)
+        .shadow(color: .black.opacity(0.6), radius: 20, y: 4)
+        .padding(.horizontal, 12)
+        .onAppear { searchFocused = true }
+    }
+}
+
+private struct PaletteRow: View {
+    let entry: CommandEntry
+    let isSelected: Bool
+
+    private let accent = Color(hex: "#D97757")
+    private let muted  = Color(hex: "#8B847C")
+    private let text   = Color(hex: "#F2EDE5")
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: entry.icon)
+                .font(.system(size: 12))
+                .foregroundColor(isSelected ? accent : muted)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.name)
+                    .font(.custom("JetBrains Mono", size: 12))
+                    .foregroundColor(isSelected ? text : text.opacity(0.85))
+                    .lineLimit(1)
+                if !entry.subtitle.isEmpty {
+                    Text(entry.subtitle)
+                        .font(.system(size: 10.5))
+                        .foregroundColor(muted)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer()
+
+            // Kind badge
+            Text(kindBadge)
+                .font(.custom("JetBrains Mono", size: 9))
+                .foregroundColor(isSelected ? accent : muted.opacity(0.6))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background((isSelected ? accent : muted).opacity(0.08))
+                .cornerRadius(3)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(isSelected ? Color(hex: "#D97757").opacity(0.10) : Color.clear)
+    }
+
+    private var kindBadge: String {
+        switch entry.kind {
+        case .command: return "cmd"
+        case .skill:   return "skill"
+        case .recent:  return "recent"
+        }
     }
 }
 

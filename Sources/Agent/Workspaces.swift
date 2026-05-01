@@ -11,6 +11,84 @@ struct Workspace: Codable, Identifiable, Sendable {
     var remoteOriginUrl: String?    // git remote origin, if available
 }
 
+// MARK: - Workspace preset (.shiro/workspace.toml)
+
+struct WorkspacePreset: Codable, Equatable {
+    var defaultModel:     String?   // e.g. "haiku" | "sonnet" | "opus"
+    var allowedTools:     [String]? // subset of tool names
+    var maxCostPerTask:   Double?   // USD ceiling per task
+    var autoApproveRisk:  String?   // "low" | "med" (auto-approve threshold)
+
+    /// Load from `<workspace>/.shiro/workspace.toml`. Returns nil if file missing.
+    static func load(from workspace: URL) -> WorkspacePreset? {
+        let tomlURL = workspace
+            .appendingPathComponent(".shiro")
+            .appendingPathComponent("workspace.toml")
+        guard let contents = try? String(contentsOf: tomlURL, encoding: .utf8) else { return nil }
+        return parse(toml: contents)
+    }
+
+    /// Write defaults to `<workspace>/.shiro/workspace.toml`.
+    static func writeDefaults(to workspace: URL) throws {
+        let dir = workspace.appendingPathComponent(".shiro")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let content = """
+# Shiro workspace preset — overrides per-task defaults.
+[shiro]
+# default_model = "sonnet"          # haiku | sonnet | opus
+# allowed_tools = ["Read", "Edit", "Bash", "Write"]
+# max_cost_per_task = 2.00
+# auto_approve_risk = "low"         # low | med
+"""
+        try content.write(to: dir.appendingPathComponent("workspace.toml"),
+                           atomically: true, encoding: .utf8)
+    }
+
+    // MARK: - Minimal TOML subset parser
+
+    private static func parse(toml: String) -> WorkspacePreset {
+        var preset = WorkspacePreset()
+        var inShiroSection = false
+        for rawLine in toml.components(separatedBy: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("#") { continue }
+            if line.hasPrefix("[") {
+                inShiroSection = line == "[shiro]"
+                continue
+            }
+            guard inShiroSection else { continue }
+            let parts = line.split(separator: "=", maxSplits: 1).map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
+            guard parts.count == 2 else { continue }
+            let key   = parts[0]
+            let value = parts[1].split(separator: "#").first
+                .map { $0.trimmingCharacters(in: .whitespaces) } ?? parts[1]
+
+            switch key {
+            case "default_model":
+                preset.defaultModel = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            case "max_cost_per_task":
+                preset.maxCostPerTask = Double(value)
+            case "auto_approve_risk":
+                preset.autoApproveRisk = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            case "allowed_tools":
+                // Parse: ["Read", "Edit", "Bash"] or ["Read","Edit"]
+                let stripped = value
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                let tools = stripped
+                    .components(separatedBy: ",")
+                    .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"'")) }
+                    .filter { !$0.isEmpty }
+                if !tools.isEmpty { preset.allowedTools = tools }
+            default:
+                break
+            }
+        }
+        return preset
+    }
+}
+
 // MARK: - WorkspacesRegistry
 
 @MainActor
@@ -112,6 +190,18 @@ final class WorkspacesRegistry: ObservableObject {
     func load() throws {
         let data = try Data(contentsOf: Self.persistURL)
         workspaces = try JSONDecoder().decode([Workspace].self, from: data)
+    }
+
+    // MARK: - Workspace preset
+
+    /// Returns the parsed preset for a workspace (or nil if none exists).
+    func preset(for workspace: Workspace) -> WorkspacePreset? {
+        WorkspacePreset.load(from: workspace.path)
+    }
+
+    /// Creates a default `.shiro/workspace.toml` in the given workspace (commented out).
+    func scaffoldPreset(for workspace: Workspace) throws {
+        try WorkspacePreset.writeDefaults(to: workspace.path)
     }
 
     // MARK: - GitHub clone

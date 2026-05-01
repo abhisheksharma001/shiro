@@ -94,6 +94,23 @@ enum Config {
     /// Seconds to wait for a high-risk tool approval before auto-denying.
     static let approvalTimeoutSeconds: TimeInterval = 300  // 5 min
 
+    /// When true, medium-risk tools prompt the user (same as high).
+    /// When false (default), medium-risk tools are auto-approved silently.
+    static var askBeforeMediumRisk: Bool {
+        get { UserDefaults.standard.object(forKey: "shiro.askMediumRisk") == nil
+            ? false
+            : UserDefaults.standard.bool(forKey: "shiro.askMediumRisk") }
+        set { UserDefaults.standard.set(newValue, forKey: "shiro.askMediumRisk") }
+    }
+
+    /// When askBeforeMediumRisk is false, show a 3-second veto toast for medium-risk actions.
+    static var showMediumRiskVetoToast: Bool {
+        get { UserDefaults.standard.object(forKey: "shiro.mediumRiskVeto") == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: "shiro.mediumRiskVeto") }
+        set { UserDefaults.standard.set(newValue, forKey: "shiro.mediumRiskVeto") }
+    }
+
     // MARK: - Screen Capture
     static let screenCaptureInterval: TimeInterval = 30  // seconds between screen analyses
     static let screenCaptureFPS: Double = 2.0             // frames per second for recording

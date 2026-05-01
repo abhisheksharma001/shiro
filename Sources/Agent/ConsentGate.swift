@@ -84,6 +84,18 @@ final class ConsentGate: ObservableObject {
     /// Tracks which channel resolved each callId, so audit logs the right channel.
     private var resolveChannel: [String: String] = [:]
 
+    // Veto results from the 3-second medium-risk toast.
+    private var vetoResults: [String: ApprovalDecision] = [:]
+
+    /// Published so the UI can show an active veto toast.
+    @Published var activeVetoToasts: [VetoToast] = []
+
+    struct VetoToast: Identifiable {
+        let id: String       // callId
+        let toolName: String
+        var secondsLeft: Int = 3
+    }
+
     // MARK: - Init
 
     init(database: ShiroDatabase) {
@@ -167,89 +179,116 @@ final class ConsentGate: ObservableObject {
             return .approved
 
         case .med:
-            // Future: short toast with veto. For now auto-approve like low.
+            if Config.askBeforeMediumRisk {
+                // Treat same as high — block on user approval.
+                return await awaitUserApproval(
+                    callId: callId, sessionKey: sessionKey, toolName: toolName,
+                    input: input, justification: justification, risk: risk)
+            }
+            // Auto-approve, but optionally show a 3-second veto toast.
+            if Config.showMediumRiskVetoToast {
+                await fireMediumRiskVetoToast(
+                    toolName: toolName, callId: callId,
+                    sessionKey: sessionKey, input: input, risk: risk,
+                    justification: justification)
+                if let vetoed = vetoResults[callId], case .denied = vetoed {
+                    vetoResults.removeValue(forKey: callId)
+                    await audit(callId: callId, sessionKey: sessionKey, toolName: toolName,
+                                input: input, risk: risk, decision: "denied", channel: "veto",
+                                justification: "3-second veto triggered")
+                    return .denied(reason: "Vetoed via toast")
+                }
+                vetoResults.removeValue(forKey: callId)
+            }
             await audit(callId: callId, sessionKey: sessionKey, toolName: toolName,
                         input: input, risk: risk, decision: "auto_approved", channel: "auto",
                         justification: nil)
             return .approved
 
         case .high:
-            // Blocking: suspend until UI or Telegram resolves — with a hard timeout
-            // so a dismissed dialog or offline Telegram doesn't deadlock the agent.
-            let decision = await withCheckedContinuation { (cont: CheckedContinuation<ApprovalDecision, Never>) in
-                // Single-shot resume guard — prevents double-resume if both the timeout
-                // and the user resolve simultaneously.
-                let resumer = ContinuationResumer(continuation: cont)
-
-                let approval = PendingApproval(
-                    id:            callId,
-                    callId:        callId,
-                    sessionKey:    sessionKey,
-                    toolName:      toolName,
-                    input:         input,
-                    justification: justification,
-                    risk:          risk,
-                    continuation:  resumer.proxy()
-                )
-                pendingApprovals.append(approval)
-
-                // Fire Telegram in parallel (non-blocking) — user may not be at Mac.
-                if let relay = telegramRelay {
-                    Task {
-                        await relay.sendApprovalCard(
-                            callId:        callId,
-                            toolName:      toolName,
-                            sessionKey:    sessionKey,
-                            input:         input,
-                            justification: justification,
-                            risk:          risk.rawValue
-                        )
-                    }
-                }
-
-                // Timeout watchdog — 5 minutes, matches Config.agentTimeoutSeconds.
-                let timeout = Config.approvalTimeoutSeconds
-                Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                    guard let self else { return }
-                    // If still pending, remove and auto-deny.
-                    if let idx = self.pendingApprovals.firstIndex(where: { $0.callId == callId }) {
-                        self.pendingApprovals.remove(at: idx)
-                        self.resolveChannel[callId] = "timeout"
-                        resumer.resume(.denied(reason: "Approval timed out after \(Int(timeout))s"))
-                    }
-                }
-            }
-
-            // Determine which channel resolved (UI default, Telegram if relay set it).
-            let channel = resolveChannel.removeValue(forKey: callId) ?? "ui"
-
-            // Translate to audit strings.
-            let decisionStr: String
-            switch decision {
-            case .approved:       decisionStr = "approved"
-            case .denied:         decisionStr = "denied"
-            case .rememberDeny:   decisionStr = "remembered_deny"
-            case .rememberAllow:  decisionStr = "remembered_allow"
-            }
-
-            await audit(callId: callId, sessionKey: sessionKey, toolName: toolName,
-                        input: input, risk: risk, decision: decisionStr, channel: channel,
-                        justification: justification)
-
-            // Edit Telegram message to show result (if relay is wired).
-            if let relay = telegramRelay {
-                Task { await relay.markResolved(callId: callId, decision: decisionStr) }
-            }
-
-            if case .rememberDeny = decision {
-                await persistPolicy(toolName: toolName, policy: "always_deny")
-            }
-            if case .rememberAllow = decision {
-                await persistPolicy(toolName: toolName, policy: "always_allow")
-            }
-            return decision
+            return await awaitUserApproval(
+                callId: callId, sessionKey: sessionKey, toolName: toolName,
+                input: input, justification: justification, risk: risk)
         }
+    }
+
+    /// Blocking helper — suspends until user (UI or Telegram) resolves the approval card,
+    /// or the timeout watchdog fires.
+    private func awaitUserApproval(
+        callId:        String,
+        sessionKey:    String,
+        toolName:      String,
+        input:         [String: Any],
+        justification: String?,
+        risk:          ToolRisk
+    ) async -> ApprovalDecision {
+        let decision = await withCheckedContinuation { (cont: CheckedContinuation<ApprovalDecision, Never>) in
+            let resumer = ContinuationResumer(continuation: cont)
+
+            let approval = PendingApproval(
+                id:            callId,
+                callId:        callId,
+                sessionKey:    sessionKey,
+                toolName:      toolName,
+                input:         input,
+                justification: justification,
+                risk:          risk,
+                continuation:  resumer.proxy()
+            )
+            pendingApprovals.append(approval)
+
+            // Fire Telegram in parallel (non-blocking).
+            if let relay = telegramRelay {
+                Task {
+                    await relay.sendApprovalCard(
+                        callId:        callId,
+                        toolName:      toolName,
+                        sessionKey:    sessionKey,
+                        input:         input,
+                        justification: justification,
+                        risk:          risk.rawValue
+                    )
+                }
+            }
+
+            // Timeout watchdog — 5 minutes.
+            let timeout = Config.approvalTimeoutSeconds
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                guard let self else { return }
+                if let idx = self.pendingApprovals.firstIndex(where: { $0.callId == callId }) {
+                    self.pendingApprovals.remove(at: idx)
+                    self.resolveChannel[callId] = "timeout"
+                    resumer.resume(.denied(reason: "Approval timed out after \(Int(timeout))s"))
+                }
+            }
+        }
+
+        let channel = resolveChannel.removeValue(forKey: callId) ?? "ui"
+
+        let decisionStr: String
+        switch decision {
+        case .approved:       decisionStr = "approved"
+        case .denied:         decisionStr = "denied"
+        case .rememberDeny:   decisionStr = "remembered_deny"
+        case .rememberAllow:  decisionStr = "remembered_allow"
+        }
+
+        await audit(callId: callId, sessionKey: sessionKey, toolName: toolName,
+                    input: input, risk: risk, decision: decisionStr, channel: channel,
+                    justification: justification)
+
+        if let relay = telegramRelay {
+            Task { await relay.markResolved(callId: callId, decision: decisionStr) }
+        }
+
+        if case .rememberDeny = decision {
+            await persistPolicy(toolName: toolName, policy: "always_deny")
+        }
+        if case .rememberAllow = decision {
+            await persistPolicy(toolName: toolName, policy: "always_allow")
+        }
+        return decision
     }
 
     // MARK: - Resolve from UI
@@ -327,5 +366,41 @@ final class ConsentGate: ObservableObject {
                 .limit(limit)
                 .fetchAll(conn)
         }) ?? []
+    }
+
+    // MARK: - Veto toast
+
+    /// Shows a 3-second veto toast for medium-risk actions. Suspends for 3s
+    /// then removes the toast. If the user taps Veto before the 3s window,
+    /// `vetoResults[callId]` will be set to `.denied`.
+    @MainActor
+    private func fireMediumRiskVetoToast(
+        toolName:      String,
+        callId:        String,
+        sessionKey:    String,
+        input:         [String: Any],
+        risk:          ToolRisk,
+        justification: String?
+    ) async {
+        var toast = VetoToast(id: callId, toolName: toolName)
+        activeVetoToasts.append(toast)
+
+        // Countdown: tick 3 times then remove.
+        for i in stride(from: 3, through: 1, by: -1) {
+            if let idx = activeVetoToasts.firstIndex(where: { $0.id == callId }) {
+                activeVetoToasts[idx].secondsLeft = i
+            }
+            // Check if already vetoed (user tapped before timeout)
+            if vetoResults[callId] != nil { break }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+
+        activeVetoToasts.removeAll { $0.id == callId }
+    }
+
+    /// Called by the veto toast UI when user taps "Veto".
+    func vetoMediumRiskAction(callId: String) {
+        vetoResults[callId] = .denied(reason: "User vetoed via 3-second toast")
+        activeVetoToasts.removeAll { $0.id == callId }
     }
 }

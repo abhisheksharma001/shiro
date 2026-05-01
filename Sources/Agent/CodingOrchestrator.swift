@@ -84,8 +84,22 @@ final class CodingOrchestrator: ObservableObject {
             .joined(separator: "-")
         let branch = "shiro/\(slug)"
 
+        // Load workspace preset (if .shiro/workspace.toml exists)
+        let preset = workspaces?.preset(for: ws)
+
         // Refine prompt via LLM (best-effort; fall back to raw task)
         let refined = await refinePrompt(task: task, workspaceName: ws.name)
+
+        // Determine cost ceiling: preset overrides default
+        let costCeiling = preset?.maxCostPerTask ?? defaultMaxCost
+
+        // Determine allowed tools: preset overrides nil (means all)
+        let tools = preset?.allowedTools
+
+        // Determine model from preset (stored in plan prompt header or resolved at run time)
+        if let model = preset?.defaultModel {
+            Config.setActiveModel(model)
+        }
 
         return CodingPlan(
             id:                   UUID().uuidString,
@@ -93,10 +107,10 @@ final class CodingOrchestrator: ObservableObject {
             workspacePath:        ws.path,
             branchName:           branch,
             prompt:               refined,
-            mode:                 .headless,       // default per BUILD-PLAN decision
+            mode:                 .headless,
             openInIDE:            true,
-            allowedTools:         nil,
-            maxCostUSD:           defaultMaxCost,
+            allowedTools:         tools,
+            maxCostUSD:           costCeiling,
             estimatedDurationMins: nil,
             createdAt:            Date()
         )
