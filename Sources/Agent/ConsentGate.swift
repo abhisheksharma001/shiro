@@ -60,9 +60,21 @@ final class ConsentGate: ObservableObject {
         case approved
         case denied(reason: String?)
         case rememberDeny
+        case rememberAllow
+    }
+
+    // MARK: - Policy entry (for UI)
+
+    struct PolicyEntry: Identifiable {
+        var id: String { toolName }
+        let toolName: String
+        let policy: String        // "always_allow" | "always_deny"
+        let updatedAt: Date
     }
 
     @Published var pendingApprovals: [PendingApproval] = []
+    /// Published list of saved policies — drives PoliciesTab in Settings.
+    @Published private(set) var policies: [PolicyEntry] = []
 
     private let db: ShiroDatabase
     /// In-memory policy cache — loaded from DB on init, updated on remember_deny.
@@ -76,21 +88,44 @@ final class ConsentGate: ObservableObject {
 
     init(database: ShiroDatabase) {
         self.db = database
-        Task { await loadPolicies() }
+        Task { await reloadPolicies() }
     }
 
-    private func loadPolicies() async {
+    /// Re-queries the DB and repopulates both `policyCache` and `policies`.
+    func reloadPolicies() async {
         do {
             let rows = try await db.pool.read { conn in
                 try ToolPolicy.fetchAll(conn)
             }
+            policyCache.removeAll()
             for row in rows {
                 policyCache[row.toolName] = row.policy
             }
+            policies = rows
+                .sorted { $0.updatedAt > $1.updatedAt }
+                .map { PolicyEntry(toolName: $0.toolName, policy: $0.policy, updatedAt: $0.updatedAt) }
             print("[ConsentGate] loaded \(rows.count) tool policies")
         } catch {
             print("[ConsentGate] policy load error: \(error)")
         }
+    }
+
+    /// Deletes a saved policy from DB + cache so the tool goes back to asking.
+    func revokePolicy(toolName: String) async {
+        policyCache.removeValue(forKey: toolName)
+        policies.removeAll { $0.toolName == toolName }
+        do {
+            try await db.pool.write { conn in
+                try conn.execute(sql: "DELETE FROM tool_policies WHERE tool_name = ?", arguments: [toolName])
+            }
+        } catch {
+            print("[ConsentGate] revokePolicy error: \(error)")
+        }
+    }
+
+    /// Public interface to manually set a policy (e.g., from Settings UI).
+    func setPolicyManual(toolName: String, policy: String) async {
+        await persistPolicy(toolName: toolName, policy: policy)
     }
 
     // MARK: - Main entry point
@@ -195,6 +230,7 @@ final class ConsentGate: ObservableObject {
             case .approved:       decisionStr = "approved"
             case .denied:         decisionStr = "denied"
             case .rememberDeny:   decisionStr = "remembered_deny"
+            case .rememberAllow:  decisionStr = "remembered_allow"
             }
 
             await audit(callId: callId, sessionKey: sessionKey, toolName: toolName,
@@ -208,6 +244,9 @@ final class ConsentGate: ObservableObject {
 
             if case .rememberDeny = decision {
                 await persistPolicy(toolName: toolName, policy: "always_deny")
+            }
+            if case .rememberAllow = decision {
+                await persistPolicy(toolName: toolName, policy: "always_allow")
             }
             return decision
         }
@@ -244,6 +283,7 @@ final class ConsentGate: ObservableObject {
             try await db.pool.write { conn in
                 try row.insert(conn, onConflict: .replace)
             }
+            await reloadPolicies()  // keep published `policies` in sync
         } catch {
             print("[ConsentGate] persistPolicy error: \(error)")
         }

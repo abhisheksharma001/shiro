@@ -617,8 +617,14 @@ struct SettingsView: View {
             ErrorLogTab()
                 .tabItem { Label("Error Log", systemImage: "exclamationmark.triangle.fill") }
                 .tag(5)
+            PoliciesTab()
+                .tabItem { Label("Policies", systemImage: "checkmark.shield.fill") }
+                .tag(6)
+            AuditTab()
+                .tabItem { Label("Audit", systemImage: "doc.text.magnifyingglass") }
+                .tag(7)
         }
-        .frame(width: 580, height: 560)
+        .frame(width: 580, height: 600)
         .padding(8)
         .environmentObject(appState)
     }
@@ -1040,6 +1046,339 @@ private struct UIPrefsTab: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+// MARK: Policies tab
+
+private struct PoliciesTab: View {
+    @EnvironmentObject var appState: AppState
+
+    private let amber  = Color(hex: "#FFB800")
+    private let green  = Color(hex: "#00FF85")
+    private let red    = Color(hex: "#FF4545")
+    private let mono   = Font.custom("JetBrains Mono", size: 11)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack {
+                Text("\(appState.consentGate?.policies.count ?? 0) saved rule\(appState.consentGate?.policies.count == 1 ? "" : "s")")
+                    .font(mono)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button {
+                    Task { await appState.consentGate?.reloadPolicies() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            if let gate = appState.consentGate, !gate.policies.isEmpty {
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 1) {
+                        ForEach(gate.policies) { entry in
+                            PolicyRow(entry: entry, gate: gate)
+                        }
+                    }
+                }
+            } else {
+                Spacer()
+                HStack {
+                    Spacer()
+                    VStack(spacing: 8) {
+                        Image(systemName: "checkmark.shield")
+                            .font(.system(size: 28))
+                            .foregroundColor(.secondary.opacity(0.5))
+                        Text("No saved policies.")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                        Text("Use 'Always Allow' or 'Never Allow' on approval cards to create one.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary.opacity(0.7))
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 280)
+                    }
+                    Spacer()
+                }
+                Spacer()
+            }
+        }
+    }
+}
+
+private struct PolicyRow: View {
+    let entry: ConsentGate.PolicyEntry
+    let gate: ConsentGate
+
+    private let green = Color(hex: "#00FF85")
+    private let red   = Color(hex: "#FF4545")
+    private let amber = Color(hex: "#FFB800")
+    private let mono  = Font.custom("JetBrains Mono", size: 11)
+
+    private static let dateFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "MMM d, HH:mm"; return f
+    }()
+
+    var body: some View {
+        HStack(spacing: 10) {
+            // Policy badge
+            Text(entry.policy == "always_allow" ? "ALLOW" : "DENY")
+                .font(.custom("JetBrains Mono", size: 9))
+                .fontWeight(.bold)
+                .tracking(0.8)
+                .foregroundColor(entry.policy == "always_allow" ? .black : .white)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(entry.policy == "always_allow" ? green : red)
+                .cornerRadius(3)
+
+            // Tool name
+            Text(entry.toolName)
+                .font(mono)
+                .foregroundColor(.primary)
+                .lineLimit(1)
+
+            Spacer()
+
+            // Timestamp
+            Text(Self.dateFmt.string(from: entry.updatedAt))
+                .font(.custom("JetBrains Mono", size: 10))
+                .foregroundColor(.secondary)
+
+            // Revoke button
+            Button {
+                Task { await gate.revokePolicy(toolName: entry.toolName) }
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 11))
+                    .foregroundColor(red.opacity(0.8))
+            }
+            .buttonStyle(.plain)
+            .help("Revoke — tool will ask again next time")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Color(hex: "#1A1916").opacity(0.4))
+    }
+}
+
+// MARK: Audit tab
+
+private struct AuditTab: View {
+    @EnvironmentObject var appState: AppState
+    @State private var approvals: [ToolApproval] = []
+    @State private var filter: AuditFilter = .all
+    @State private var search: String = ""
+    @State private var loading = false
+
+    enum AuditFilter: String, CaseIterable {
+        case all = "All"
+        case approved = "Approved"
+        case denied = "Denied"
+        case auto = "Auto"
+    }
+
+    private static let dateFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "MMM d HH:mm:ss"; return f
+    }()
+
+    private var filtered: [ToolApproval] {
+        approvals.filter { item in
+            let matchesFilter: Bool
+            switch filter {
+            case .all:      matchesFilter = true
+            case .approved: matchesFilter = item.decision == "approved" || item.decision == "remembered_allow"
+            case .denied:   matchesFilter = item.decision == "denied" || item.decision == "remembered_deny"
+            case .auto:     matchesFilter = item.decision == "auto_approved"
+            }
+            let matchesSearch = search.isEmpty ||
+                item.toolName.localizedCaseInsensitiveContains(search) ||
+                item.decision.localizedCaseInsensitiveContains(search)
+            return matchesFilter && matchesSearch
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Toolbar
+            HStack(spacing: 8) {
+                // Search
+                HStack(spacing: 4) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    TextField("Filter by tool…", text: $search)
+                        .font(.custom("JetBrains Mono", size: 11))
+                        .textFieldStyle(.plain)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color(hex: "#111111"))
+                .cornerRadius(5)
+                .frame(maxWidth: 180)
+
+                Spacer()
+
+                // Filter pills
+                HStack(spacing: 4) {
+                    ForEach(AuditFilter.allCases, id: \.self) { f in
+                        Button(f.rawValue) { filter = f }
+                            .font(.custom("JetBrains Mono", size: 10))
+                            .foregroundColor(filter == f ? .black : .secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(filter == f ? Color(hex: "#D97757") : Color(hex: "#222222"))
+                            .cornerRadius(4)
+                            .buttonStyle(.plain)
+                    }
+                }
+
+                // Refresh
+                Button {
+                    Task { await loadApprovals() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11))
+                        .rotationEffect(loading ? .degrees(360) : .zero)
+                        .animation(loading ? .linear(duration: 1).repeatForever(autoreverses: false) : .default, value: loading)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            if filtered.isEmpty {
+                Spacer()
+                HStack {
+                    Spacer()
+                    VStack(spacing: 6) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.system(size: 28))
+                            .foregroundColor(.secondary.opacity(0.4))
+                        Text("No records match.")
+                            .font(.system(size: 12)).foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                Spacer()
+            } else {
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 1) {
+                        ForEach(filtered, id: \.id) { item in
+                            AuditRow(item: item, gate: appState.consentGate) {
+                                Task { await loadApprovals() }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .task { await loadApprovals() }
+    }
+
+    private func loadApprovals() async {
+        loading = true
+        approvals = await appState.consentGate?.recentApprovals(limit: 200) ?? []
+        loading = false
+    }
+}
+
+private struct AuditRow: View {
+    let item: ToolApproval
+    let gate: ConsentGate?
+    let onReverted: () -> Void
+
+    private let green = Color(hex: "#00FF85")
+    private let red   = Color(hex: "#FF4545")
+    private let amber = Color(hex: "#FFB800")
+    private let mono  = Font.custom("JetBrains Mono", size: 10)
+
+    private static let dateFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "MMM d HH:mm:ss"; return f
+    }()
+
+    private var decisionColor: Color {
+        switch item.decision {
+        case "approved", "remembered_allow", "auto_approved": return green
+        case "denied", "remembered_deny":                      return red
+        default:                                               return Color.secondary
+        }
+    }
+
+    private var decisionLabel: String {
+        switch item.decision {
+        case "auto_approved":    return "AUTO"
+        case "approved":         return "OK"
+        case "denied":           return "DENY"
+        case "remembered_deny":  return "NEVER"
+        case "remembered_allow": return "ALWAYS"
+        default:                 return item.decision.uppercased()
+        }
+    }
+
+    private var channelLabel: String {
+        switch item.channel {
+        case "telegram": return "📱"
+        case "auto":     return "🤖"
+        case "timeout":  return "⏱"
+        default:         return "🖥"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(Self.dateFmt.string(from: item.createdAt))
+                .font(mono)
+                .foregroundColor(.secondary)
+                .frame(width: 110, alignment: .leading)
+
+            Text(channelLabel)
+                .font(.system(size: 10))
+
+            Text(decisionLabel)
+                .font(.custom("JetBrains Mono", size: 9))
+                .fontWeight(.bold)
+                .foregroundColor(item.decision.contains("auto") ? .black : .white)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(decisionColor)
+                .cornerRadius(3)
+
+            Text(item.toolName)
+                .font(mono)
+                .foregroundColor(.primary)
+                .lineLimit(1)
+
+            Spacer()
+
+            // Only show "Block" for approved rows — lets user flip a past approval to deny
+            if item.decision == "approved" || item.decision == "remembered_allow" {
+                Button("Block") {
+                    Task {
+                        await gate?.setPolicyManual(toolName: item.toolName, policy: "always_deny")
+                        onReverted()
+                    }
+                }
+                .font(.custom("JetBrains Mono", size: 10))
+                .foregroundColor(red.opacity(0.8))
+                .buttonStyle(.plain)
+                .help("Set always_deny policy for \(item.toolName)")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color(hex: "#1A1916").opacity(0.3))
     }
 }
 
