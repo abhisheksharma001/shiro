@@ -1,5 +1,28 @@
 import Foundation
 
+// MARK: - MultiCodingPlan (Phase 7)
+
+enum MergeStrategy: String, Codable { case sequentialPRs, singlePR, userReview }
+
+struct Subtask: Codable {
+    let title: String
+    let prompt: String
+    let workspaceName: String
+    let branchName: String
+    let dependsOn: [String]
+    var workspacePath: URL?          // filled in at runtime
+
+    enum CodingKeys: CodingKey {
+        case title, prompt, workspaceName, branchName, dependsOn
+    }
+}
+
+struct MultiCodingPlan: Codable {
+    let parentTask: String
+    var subtasks: [Subtask]
+    let mergeStrategy: MergeStrategy
+}
+
 // MARK: - CodingPlan
 
 struct CodingPlan: Codable, Identifiable {
@@ -272,6 +295,164 @@ final class CodingOrchestrator: ObservableObject {
     func cancelHeadless() async {
         await activeRunner?.cancel()
         activeRunner = nil
+    }
+
+    // MARK: - Multi-plan (Phase 7)
+
+    /// Decompose a complex task into parallel subtasks.
+    func planMulti(task: String, hint: String? = nil) async throws -> MultiCodingPlan {
+        guard let appState, let coordinator = appState.agentCoordinator else {
+            throw CodingOrchestratorError.noWorkspace("Agent not ready")
+        }
+        let ws = workspaces?.resolve(hint: hint ?? task) ?? workspaces?.workspaces.first
+        guard let ws else { throw CodingOrchestratorError.noWorkspace("No workspace found") }
+
+        let prompt = """
+You are a software project planner. Decompose this task into 2-5 independent subtasks \
+that can each run in their own git worktree in parallel.
+
+Project: \(ws.name)
+Task: \(task)
+
+Rules:
+- Each subtask must be independently completable without needing the others to finish first.
+- If subtask B depends on A, mark it in dependsOn.
+- Branch names must be kebab-case, start with "shiro/".
+
+Output ONLY valid JSON matching this schema:
+{
+  "parentTask": "<original task>",
+  "subtasks": [
+    {
+      "title": "short title",
+      "prompt": "detailed claude code prompt",
+      "workspaceName": "\(ws.name)",
+      "branchName": "shiro/subtask-slug",
+      "dependsOn": []
+    }
+  ],
+  "mergeStrategy": "userReview"
+}
+"""
+        let result = try await coordinator.run(query: prompt)
+        guard let start = result.firstIndex(of: "{"),
+              let end   = result.lastIndex(of: "}") else {
+            throw CodingOrchestratorError.headlessFailed("Could not parse multi-plan JSON")
+        }
+        let jsonStr = String(result[start...end])
+        guard let data = jsonStr.data(using: .utf8) else {
+            throw CodingOrchestratorError.headlessFailed("JSON encoding error")
+        }
+        var plan = try JSONDecoder().decode(MultiCodingPlan.self, from: data)
+        // Fill in workspace path for each subtask
+        plan.subtasks = plan.subtasks.map { sub in
+            var s = sub; s.workspacePath = ws.path; return s
+        }
+        return plan
+    }
+
+    /// Execute a MultiCodingPlan — runs up to 3 subtasks in parallel using TaskGroup.
+    /// Pre-resolves workspace paths and creates worktrees on MainActor before launching.
+    func executeMulti(_ plan: MultiCodingPlan,
+                      sink: RemoteReplySink? = nil,
+                      replyToken: String? = nil) async throws {
+
+        await sink?.streamChunk("🚀 Starting \(plan.subtasks.count) subtasks…\n",
+                                replyToken: replyToken)
+
+        // Pre-resolve: create all worktrees on MainActor before entering TaskGroup
+        struct ResolvedSubtask: Sendable {
+            let title: String
+            let prompt: String
+            let branchName: String
+            let worktreeURL: URL
+            let dependsOn: [String]
+        }
+
+        var resolved: [ResolvedSubtask] = []
+        for sub in plan.subtasks {
+            let wsPath = workspaces?.workspaces.first(where: { $0.name == sub.workspaceName })?.path
+                      ?? workspaces?.workspaces.first?.path
+                      ?? sub.workspacePath
+            guard let wsPath else {
+                await sink?.streamChunk("⚠️ No workspace for subtask '\(sub.title)'\n",
+                                        replyToken: replyToken)
+                continue
+            }
+            do {
+                let wtURL = try createWorktree(workspace: wsPath, branch: sub.branchName)
+                resolved.append(ResolvedSubtask(
+                    title:       sub.title,
+                    prompt:      sub.prompt,
+                    branchName:  sub.branchName,
+                    worktreeURL: wtURL,
+                    dependsOn:   sub.dependsOn
+                ))
+            } catch {
+                await sink?.streamChunk("⚠️ Worktree failed for '\(sub.title)': \(error.localizedDescription)\n",
+                                        replyToken: replyToken)
+            }
+        }
+
+        // Run in parallel (max 3 at a time), respecting dependsOn DAG
+        // Simple approach: topological sort → batch groups → run each batch
+        var completedTitles: Set<String> = []
+        var remaining = resolved
+
+        while !remaining.isEmpty {
+            // Pick subtasks whose dependencies are all satisfied
+            let ready = remaining.filter { r in
+                r.dependsOn.allSatisfy { completedTitles.contains($0) }
+            }
+            if ready.isEmpty {
+                // Circular dependency or unresolvable — run everything remaining
+                break
+            }
+            remaining.removeAll { r in ready.contains(where: { $0.title == r.title }) }
+
+            // Run this batch (up to 3) in parallel
+            let batch = Array(ready.prefix(3))
+            var batchResults: [String: Bool] = [:]
+
+            await withTaskGroup(of: (String, Bool).self) { group in
+                for sub in batch {
+                    let title      = sub.title
+                    let prompt     = sub.prompt
+                    let wtURL      = sub.worktreeURL
+                    let capturedSink = sink
+                    let capturedToken = replyToken
+                    group.addTask {
+                        let runner = ClaudeCodeRunner()
+                        var success = true
+                        for await event in await runner.run(cwd: wtURL, prompt: prompt, budgetUSD: 2.0) {
+                            switch event {
+                            case .assistantText(let t):
+                                await capturedSink?.streamChunk("[**\(title)**] \(t)\n",
+                                                                replyToken: capturedToken)
+                            case .done(let r) where r.exitCode != 0:
+                                success = false
+                            case .error:
+                                success = false
+                            default: break
+                            }
+                        }
+                        return (title, success)
+                    }
+                }
+                for await (title, success) in group {
+                    batchResults[title] = success
+                    let icon = success ? "✅" : "❌"
+                    await sink?.streamChunk("\(icon) **\(title)** complete\n", replyToken: replyToken)
+                }
+            }
+
+            for (title, _) in batchResults { completedTitles.insert(title) }
+        }
+
+        let succeeded = completedTitles.count
+        let total     = resolved.count
+        await sink?.streamFinished(replyToken: replyToken,
+            finalText: "**Multi-plan complete:** \(succeeded)/\(total) subtasks done.")
     }
 
     // MARK: - LLM prompt refinement

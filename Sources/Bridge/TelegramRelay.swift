@@ -34,6 +34,8 @@ final class TelegramRelay {
     private var pendingMessages: [String: Int] = [:]
     /// planId → CodingPlan — stored while waiting for Telegram approve/cancel button.
     private var pendingPlans: [String: CodingPlan] = [:]
+    /// key → MultiCodingPlan — stored while waiting for Telegram multi-approve.
+    private var pendingMultiPlans: [String: MultiCodingPlan] = [:]
     /// Last seen update_id from getUpdates (for offset tracking).
     private var updateOffset: Int = 0
     /// True while the poll loop should keep running.
@@ -228,6 +230,31 @@ Tap a button to decide ↓
             guard parts.count == 2 else { return }
             let action = parts[0], value = parts[1]
 
+            // ── Multi-plan approval ───────────────────────────────────────
+            if action == "multi_execute" || action == "multi_cancel" {
+                if action == "multi_execute", let plan = pendingMultiPlans.removeValue(forKey: "latest") {
+                    Task { [weak self] in
+                        guard let self else { return }
+                        var streamMsgId: Int? = nil
+                        if let resp = try? await self.apiCall(method: "sendMessage", params: [
+                            "chat_id":    self.chatId,
+                            "text":       "⏳ _Running \(plan.subtasks.count) subtasks in parallel…_",
+                            "parse_mode": "Markdown"
+                        ]) { streamMsgId = (resp["result"] as? [String: Any])?["message_id"] as? Int }
+                        let token = streamMsgId.map(String.init)
+                        do {
+                            try await self.appState?.codingOrchestrator?.executeMulti(plan, sink: self, replyToken: token)
+                        } catch {
+                            await self.notify("❌ Multi-plan failed: \(error.localizedDescription)")
+                        }
+                    }
+                } else {
+                    pendingMultiPlans.removeValue(forKey: "latest")
+                    await notify("❌ Multi-plan cancelled.")
+                }
+                return
+            }
+
             // ── Coding plan approval ──────────────────────────────────────
             if action == "code_execute" || action == "code_cancel" {
                 guard let plan = pendingPlans.removeValue(forKey: value) else { return }
@@ -319,6 +346,10 @@ Send me anything and I'll run it through the agent.
 `/code <task>` — plan + launch Claude Code in VS Code
 `/repos` — list your GitHub repos
 `/clone owner/repo` — clone a GitHub repo to ~/Projects
+`/multi <task>` — decompose task into parallel subtasks
+`/agents` — list saved subagent definitions
+`/agents-suggest` — auto-detect patterns in task history
+`/agents-save <n>` — save a suggested agent definition
 """)
 
         case "/cancel":
@@ -409,6 +440,92 @@ Send me anything and I'll run it through the agent.
                 pendingPlans[plan.id] = plan
             } catch {
                 await notify("❌ Planning failed: \(error.localizedDescription)")
+            }
+
+        case "/multi":
+            if args.isEmpty {
+                await notify("Usage: `/multi <complex task>`\n\nShiro decomposes it into parallel subtasks, each running in its own worktree.")
+                return
+            }
+            guard let orch = appState?.codingOrchestrator else {
+                await notify("❌ CodingOrchestrator not ready.")
+                return
+            }
+            await notify("🧠 _Decomposing into subtasks…_")
+            do {
+                let multiPlan = try await orch.planMulti(task: args)
+                var preview = "*Multi-task plan (\(multiPlan.subtasks.count) subtasks):*\n"
+                for (i, sub) in multiPlan.subtasks.enumerated() {
+                    let deps = sub.dependsOn.isEmpty ? "" : " _(after: \(sub.dependsOn.joined(separator: ", ")))_"
+                    preview += "\n\(i+1). **\(sub.title)**\(deps)\n`\(sub.branchName)`"
+                }
+                let keyboard: [String: Any] = [
+                    "inline_keyboard": [[
+                        ["text": "✅ Run all", "callback_data": "multi_execute:\(UUID().uuidString)"],
+                        ["text": "❌ Cancel",  "callback_data": "multi_cancel:0"]
+                    ]]
+                ]
+                let resp = try? await apiCall(method: "sendMessage", params: [
+                    "chat_id":      chatId,
+                    "text":         preview,
+                    "parse_mode":   "Markdown",
+                    "reply_markup": keyboard
+                ])
+                if let msgId = (resp?["result"] as? [String: Any])?["message_id"] as? Int {
+                    pendingMultiPlans[String((resp?["result"] as? [String: Any])?["message_id"] as? Int ?? 0)] = multiPlan
+                    _ = msgId
+                }
+                // Store by a key we can recover from the callback
+                pendingMultiPlans["latest"] = multiPlan
+            } catch {
+                await notify("❌ Multi-plan failed: \(error.localizedDescription)")
+            }
+
+        case "/agents":
+            guard let synth = appState?.subAgentSynthesizer else {
+                await notify("❌ Synthesizer not ready.")
+                return
+            }
+            let agents = (try? await synth.listAgents()) ?? []
+            if agents.isEmpty {
+                await notify("No agent definitions found.\n\nUse `/agents-suggest` to auto-generate from your task history.")
+            } else {
+                let list = agents.map { "• `\($0.name)` — \($0.description)" }.joined(separator: "\n")
+                await notify("*Saved agents (\(agents.count)):*\n\n\(list)\n\nStored in `~/.claude/agents/`")
+            }
+
+        case "/agents-suggest":
+            guard let synth = appState?.subAgentSynthesizer else {
+                await notify("❌ Synthesizer not ready.")
+                return
+            }
+            await notify("🔍 _Analyzing task history for patterns…_")
+            await synth.suggestAgents(lastN: 30)
+            if synth.suggestions.isEmpty {
+                await notify("No recurring patterns found yet. Keep using Shiro and try again after a few more tasks.")
+            } else {
+                var reply = "*Suggested agents (\(synth.suggestions.count)):*\n"
+                for (i, s) in synth.suggestions.enumerated() {
+                    reply += "\n\(i+1). **\(s.name)**\n_\(s.description)_"
+                }
+                reply += "\n\nReply `/agents-save <1|2|3>` to save a suggestion."
+                await notify(reply)
+            }
+
+        case "/agents-save":
+            let idxStr = args.trimmingCharacters(in: .whitespaces)
+            guard let idx = Int(idxStr), idx >= 1,
+                  let synth = appState?.subAgentSynthesizer,
+                  idx <= synth.suggestions.count else {
+                await notify("Usage: `/agents-save <number>` — use after `/agents-suggest`")
+                return
+            }
+            let suggestion = synth.suggestions[idx - 1]
+            do {
+                try await synth.writeAgent(suggestion, scope: .user)
+                await notify("✅ Agent `\(suggestion.name)` saved to `~/.claude/agents/\(suggestion.name).md`")
+            } catch {
+                await notify("❌ Save failed: \(error.localizedDescription)")
             }
 
         case "/repos":

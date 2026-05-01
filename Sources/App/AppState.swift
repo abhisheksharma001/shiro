@@ -79,6 +79,7 @@ final class AppState: ObservableObject {
     private(set) var codingOrchestrator:   CodingOrchestrator?    // Phase 3
     private(set) var gitHubBridge:         GitHubBridge?          // Phase 5
     private(set) var httpRemoteServer:     HTTPRemoteServer?      // Phase 6
+    private(set) var subAgentSynthesizer:  SubAgentSynthesizer?   // Phase 7
     private(set) var mcpRegistry:          MCPRegistry?
     private(set) var skillsRegistry:   SkillsRegistry?
     private(set) var hooksEngine:      HooksEngine?
@@ -203,6 +204,11 @@ final class AppState: ObservableObject {
 
             // Phase 5: GitHub bridge (gh CLI wrapper)
             self.gitHubBridge = GitHubBridge()
+
+            // Phase 7: Sub-agent synthesizer
+            let synth = SubAgentSynthesizer()
+            synth.appState = self
+            self.subAgentSynthesizer = synth
 
             // Phase 6: HTTP remote server (off by default; user enables in Settings)
             let httpServer = HTTPRemoteServer()
