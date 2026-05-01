@@ -74,6 +74,7 @@ final class AppState: ObservableObject {
     private(set) var memoryStore:      MemoryStore?
     private(set) var ingestor:         Ingestor?
     private(set) var telegramRelay:    TelegramRelay?
+    private(set) var remoteInbox:      RemoteInbox?       // Phase 2
     private(set) var mcpRegistry:      MCPRegistry?
     private(set) var skillsRegistry:   SkillsRegistry?
     private(set) var hooksEngine:      HooksEngine?
@@ -132,7 +133,13 @@ final class AppState: ObservableObject {
                 gate.telegramRelay = relay
                 relay.start()
                 self.telegramRelay = relay
-                print("[Shiro] ✅ Telegram relay started")
+
+                // Phase 2: RemoteInbox abstraction
+                let inbox = RemoteInbox(appState: self)
+                inbox.register(relay, for: .telegram)
+                self.remoteInbox = inbox
+
+                print("[Shiro] ✅ Telegram relay started + RemoteInbox wired")
             } else {
                 print("[Shiro] ℹ️  Telegram relay disabled")
             }

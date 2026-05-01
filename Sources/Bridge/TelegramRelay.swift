@@ -436,6 +436,53 @@ Send me a message and I'll run it through the agent.
     }
 }
 
+// MARK: - RemoteReplySink conformance (Phase 2)
+//
+// When messages arrive via RemoteInbox, chunks are delivered here instead of
+// being driven directly by handleIncomingText. Both paths still work — direct
+// path is used when TelegramRelay handles messages itself (backward compat).
+
+extension TelegramRelay: RemoteReplySink {
+
+    func streamChunk(_ text: String, replyToken: String?) async {
+        // replyToken is the message_id as a String when sent from RemoteInbox path.
+        // Chunk delivery handled by handleIncomingText's own streaming loop in direct path.
+        // For RemoteInbox path, we accumulate and edit in streamFinished.
+        // Lightweight no-op here; heavy lifting done in streamFinished.
+        _ = replyToken  // suppress unused warning — used in streamFinished
+    }
+
+    func streamFinished(replyToken: String?, finalText: String) async {
+        guard let token = replyToken, let msgId = Int(token) else {
+            // No existing message — send fresh.
+            await notify(finalText.isEmpty ? "_(no response)_" : finalText)
+            return
+        }
+        let text = finalText.count > 4000
+            ? "..." + String(finalText.suffix(3900))
+            : finalText
+        _ = try? await apiCall(method: "editMessageText", params: [
+            "chat_id":    chatId,
+            "message_id": msgId,
+            "text":       text.isEmpty ? "_(no response)_" : text,
+            "parse_mode": "Markdown"
+        ])
+    }
+
+    func streamError(_ message: String, replyToken: String?) async {
+        if let token = replyToken, let msgId = Int(token) {
+            _ = try? await apiCall(method: "editMessageText", params: [
+                "chat_id":    chatId,
+                "message_id": msgId,
+                "text":       message,
+                "parse_mode": "Markdown"
+            ])
+        } else {
+            await notify(message)
+        }
+    }
+}
+
 // MARK: - Stream buffer (tracks flush position, thread-safe via actor)
 
 private actor StreamBuffer {
