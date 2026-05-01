@@ -269,8 +269,48 @@ final class ShiroDatabase {
             try db.create(indexOn: "ingest_jobs", columns: ["status"])
         }
 
+        migrator.registerMigration("v4_cost_records") { db in
+            try db.create(table: "cost_records", ifNotExists: true) { t in
+                t.column("id",           .text).primaryKey()
+                t.column("task_id",      .text).notNull()
+                t.column("session_id",   .text)
+                t.column("model",        .text).notNull()
+                t.column("input_tokens", .integer).notNull().defaults(to: 0)
+                t.column("output_tokens",.integer).notNull().defaults(to: 0)
+                t.column("cost_usd",     .double).notNull().defaults(to: 0)
+                t.column("created_at",   .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+            }
+            try db.create(indexOn: "cost_records", columns: ["task_id"])
+            try db.create(indexOn: "cost_records", columns: ["created_at"])
+        }
+
         try migrator.migrate(pool)
         print("[DB] ✅ Migrations complete")
+    }
+}
+
+// MARK: - Cost Record (Phase 8)
+
+struct CostRecord: Codable, FetchableRecord, PersistableRecord {
+    static let databaseTableName = "cost_records"
+    var id:           String
+    var taskId:       String
+    var sessionId:    String?
+    var model:        String
+    var inputTokens:  Int
+    var outputTokens: Int
+    var costUSD:      Double
+    var createdAt:    Date
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case taskId       = "task_id"
+        case sessionId    = "session_id"
+        case model
+        case inputTokens  = "input_tokens"
+        case outputTokens = "output_tokens"
+        case costUSD      = "cost_usd"
+        case createdAt    = "created_at"
     }
 }
 

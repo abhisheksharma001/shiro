@@ -675,6 +675,9 @@ struct SettingsView: View {
             RemoteAccessTab()
                 .tabItem { Label("Remote", systemImage: "network") }
                 .tag(8)
+            BudgetTab()
+                .tabItem { Label("Budget", systemImage: "dollarsign.circle.fill") }
+                .tag(9)
         }
         .frame(width: 580, height: 600)
         .padding(8)
@@ -1549,6 +1552,300 @@ curl -s -X POST http://127.0.0.1:\(port)/v1/prompt \\
                 port = "\(srv.port)"
             }
         }
+    }
+}
+
+// MARK: Budget tab
+
+private struct BudgetTab: View {
+    @EnvironmentObject var appState: AppState
+    @State private var ceilingValue: Double = 2.00
+    @State private var dailyCeilingEnabled: Bool = false
+    @State private var dailyCeilingValue: Double = 10.00
+    @State private var refreshing: Bool = false
+    @State private var confirmResetMonth: Bool = false
+
+    private let mono   = Font.custom("JetBrains Mono", size: 11)
+    private let monoSm = Font.custom("JetBrains Mono", size: 10)
+
+    private static let dateFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateStyle = .short; f.timeStyle = .short; return f
+    }()
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+
+                // ── Spend overview ────────────────────────────────────────────
+                HStack(spacing: 0) {
+                    spendCard(
+                        label: "TODAY",
+                        value: appState.costLedger?.todaySpend ?? 0,
+                        icon: "sun.max.fill",
+                        color: Color(hex: "#D4A574")
+                    )
+                    Divider().frame(maxHeight: 80)
+                    spendCard(
+                        label: "THIS MONTH",
+                        value: appState.costLedger?.monthSpend ?? 0,
+                        icon: "calendar",
+                        color: Color(hex: "#D97757")
+                    )
+                }
+                .background(Color(hex: "#25221E"))
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(hex: "#3A3530"), lineWidth: 1))
+
+                // ── Per-task ceiling slider ───────────────────────────────────
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Image(systemName: "stopwatch.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color(hex: "#D97757"))
+                        Text("DEFAULT PER-TASK CEILING")
+                            .font(.custom("JetBrains Mono", size: 10))
+                            .fontWeight(.bold)
+                            .tracking(0.6)
+                            .foregroundColor(Color(hex: "#8B847C"))
+                    }
+
+                    HStack(spacing: 10) {
+                        Text("$0.50")
+                            .font(monoSm)
+                            .foregroundColor(Color(hex: "#5C544C"))
+
+                        Slider(value: $ceilingValue, in: 0.50...20.00, step: 0.25)
+                            .tint(Color(hex: "#D97757"))
+                            .onChange(of: ceilingValue) { _, v in
+                                appState.costLedger?.taskCostCeiling = v
+                            }
+
+                        Text("$20")
+                            .font(monoSm)
+                            .foregroundColor(Color(hex: "#5C544C"))
+                    }
+
+                    HStack {
+                        Text("Current ceiling:")
+                            .font(monoSm)
+                            .foregroundColor(Color(hex: "#8B847C"))
+                        Text(String(format: "$%.2f", ceilingValue))
+                            .font(.custom("JetBrains Mono", size: 13))
+                            .fontWeight(.semibold)
+                            .foregroundColor(Color(hex: "#F2EDE5"))
+                        Text("per task")
+                            .font(monoSm)
+                            .foregroundColor(Color(hex: "#5C544C"))
+                    }
+
+                    Text("Tasks exceeding this cost will be interrupted automatically.")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(Color(hex: "#5C544C"))
+                }
+                .padding(14)
+                .background(Color(hex: "#25221E"))
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(hex: "#3A3530"), lineWidth: 1))
+
+                // ── Daily ceiling ─────────────────────────────────────────────
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Image(systemName: "gauge.with.needle")
+                            .font(.system(size: 11))
+                            .foregroundColor(dailyCeilingEnabled ? Color(hex: "#D97757") : Color(hex: "#5C544C"))
+                        Text("DAILY CEILING")
+                            .font(.custom("JetBrains Mono", size: 10))
+                            .fontWeight(.bold)
+                            .tracking(0.6)
+                            .foregroundColor(Color(hex: "#8B847C"))
+                        Spacer()
+                        Toggle("", isOn: $dailyCeilingEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .scaleEffect(0.8)
+                    }
+
+                    if dailyCeilingEnabled {
+                        HStack(spacing: 10) {
+                            Text("$1")
+                                .font(monoSm)
+                                .foregroundColor(Color(hex: "#5C544C"))
+                            Slider(value: $dailyCeilingValue, in: 1.00...100.00, step: 1.00)
+                                .tint(Color(hex: "#D97757"))
+                            Text("$100")
+                                .font(monoSm)
+                                .foregroundColor(Color(hex: "#5C544C"))
+                        }
+                        HStack {
+                            Text("Stop all tasks today after spending:")
+                                .font(monoSm)
+                                .foregroundColor(Color(hex: "#8B847C"))
+                            Text(String(format: "$%.0f", dailyCeilingValue))
+                                .font(.custom("JetBrains Mono", size: 13))
+                                .fontWeight(.semibold)
+                                .foregroundColor(Color(hex: "#F2EDE5"))
+                        }
+                    } else {
+                        Text("No daily limit. Tasks run until their per-task ceiling.")
+                            .font(.system(size: 10.5))
+                            .foregroundColor(Color(hex: "#5C544C"))
+                    }
+                }
+                .padding(14)
+                .background(Color(hex: "#25221E"))
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(hex: "#3A3530"), lineWidth: 1))
+
+                // ── Top tasks table ───────────────────────────────────────────
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Image(systemName: "list.bullet.rectangle")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color(hex: "#D97757"))
+                        Text("TOP TASKS BY COST")
+                            .font(.custom("JetBrains Mono", size: 10))
+                            .fontWeight(.bold)
+                            .tracking(0.6)
+                            .foregroundColor(Color(hex: "#8B847C"))
+                        Spacer()
+                        Button {
+                            Task {
+                                refreshing = true
+                                await appState.costLedger?.refresh()
+                                refreshing = false
+                            }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 11))
+                                .rotationEffect(refreshing ? .degrees(360) : .zero)
+                                .animation(refreshing ? .linear(duration: 1).repeatForever(autoreverses: false) : .default,
+                                           value: refreshing)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(Color(hex: "#5C544C"))
+                    }
+
+                    // Header row
+                    HStack(spacing: 0) {
+                        Text("TASK ID")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text("MODEL")
+                            .frame(width: 90, alignment: .leading)
+                        Text("DATE")
+                            .frame(width: 90, alignment: .leading)
+                        Text("COST")
+                            .frame(width: 70, alignment: .trailing)
+                    }
+                    .font(.custom("JetBrains Mono", size: 9))
+                    .fontWeight(.bold)
+                    .tracking(0.5)
+                    .foregroundColor(Color(hex: "#5C544C"))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color(hex: "#1A1916"))
+
+                    let tasks = appState.costLedger?.topTasks ?? []
+                    if tasks.isEmpty {
+                        HStack {
+                            Spacer()
+                            Text("No task cost data yet.")
+                                .font(.system(size: 11))
+                                .foregroundColor(Color(hex: "#5C544C"))
+                                .padding(.vertical, 20)
+                            Spacer()
+                        }
+                    } else {
+                        ForEach(Array(tasks.enumerated()), id: \.element.id) { idx, task in
+                            HStack(spacing: 0) {
+                                Text(task.taskId.prefix(24))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .lineLimit(1)
+                                Text(shortModel(task.model))
+                                    .frame(width: 90, alignment: .leading)
+                                Text(Self.dateFmt.string(from: task.recordedAt))
+                                    .frame(width: 90, alignment: .leading)
+                                Text(String(format: "$%.4f", task.totalCost))
+                                    .frame(width: 70, alignment: .trailing)
+                                    .foregroundColor(task.totalCost > 0.50 ? Color(hex: "#D97757") : Color(hex: "#F2EDE5"))
+                            }
+                            .font(.custom("JetBrains Mono", size: 10))
+                            .foregroundColor(Color(hex: "#F2EDE5"))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(idx % 2 == 0 ? Color(hex: "#211E1B") : Color(hex: "#1A1916"))
+                        }
+                    }
+                }
+                .background(Color(hex: "#25221E"))
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(hex: "#3A3530"), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                // ── Reset ─────────────────────────────────────────────────────
+                HStack {
+                    Spacer()
+                    if confirmResetMonth {
+                        HStack(spacing: 8) {
+                            Text("Reset monthly spend tracking?")
+                                .font(.system(size: 11))
+                                .foregroundColor(Color(hex: "#8B847C"))
+                            Button("Cancel") { confirmResetMonth = false }
+                                .font(.system(size: 11))
+                                .buttonStyle(.plain)
+                                .foregroundColor(Color(hex: "#8B847C"))
+                            Button("Confirm Reset") {
+                                confirmResetMonth = false
+                                // Note: resets the UI display only (DB records remain)
+                                appState.costLedger?.monthSpend = 0
+                            }
+                            .font(.system(size: 11))
+                            .buttonStyle(.plain)
+                            .foregroundColor(Color(hex: "#D86553"))
+                        }
+                    } else {
+                        Button("Reset month display") { confirmResetMonth = true }
+                            .font(.system(size: 11))
+                            .buttonStyle(.plain)
+                            .foregroundColor(Color(hex: "#5C544C"))
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .onAppear {
+            ceilingValue = appState.costLedger?.taskCostCeiling ?? 2.00
+            Task { await appState.costLedger?.refresh() }
+        }
+    }
+
+    private func spendCard(label: String, value: Double, icon: String, color: Color) -> some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(color)
+                Text(label)
+                    .font(.custom("JetBrains Mono", size: 9))
+                    .fontWeight(.bold)
+                    .tracking(0.6)
+                    .foregroundColor(Color(hex: "#8B847C"))
+            }
+            Text(String(format: "$%.4f", value))
+                .font(.custom("JetBrains Mono", size: 20))
+                .fontWeight(.semibold)
+                .foregroundColor(Color(hex: "#F2EDE5"))
+                .monospacedDigit()
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 18)
+    }
+
+    private func shortModel(_ model: String) -> String {
+        let m = model.lowercased()
+        if m.contains("opus")   { return "opus" }
+        if m.contains("haiku")  { return "haiku" }
+        if m.contains("sonnet") { return "sonnet" }
+        return String(model.prefix(10))
     }
 }
 

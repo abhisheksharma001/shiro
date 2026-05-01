@@ -261,8 +261,16 @@ final class CodingOrchestrator: ObservableObject {
                 textAcc += msg
                 await sink?.streamChunk(msg, replyToken: token)
 
-            case .usage(_, _, let c) where c > 0:
+            case .usage(let input, let output, let c) where c > 0:
                 cost = c
+                // Record spend in CostLedger
+                let model = Config.activeModel ?? "claude-sonnet-4-6"
+                await appState?.costLedger?.recordUsage(
+                    taskId:       plan.branchName,
+                    model:        model,
+                    inputTokens:  input,
+                    outputTokens: output
+                )
                 if c > plan.maxCostUSD {
                     let errMsg = "\n⚠️ Budget exceeded ($\(String(format: "%.4f", c)) > $\(plan.maxCostUSD))"
                     await sink?.streamError(errMsg, replyToken: token)
