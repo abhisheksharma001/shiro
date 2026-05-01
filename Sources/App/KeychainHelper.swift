@@ -22,6 +22,8 @@ enum KeychainHelper {
         case huggingFaceToken  = "huggingface_token"
         // PageGrid — AI documentation search service
         case pagegridAPIKey    = "pagegrid_api_key"
+        // HTTP remote server bearer token (Phase 6)
+        case shiroRemoteToken  = "shiro_remote_token"
     }
 
     // MARK: - Read / Write / Delete

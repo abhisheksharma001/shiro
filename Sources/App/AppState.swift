@@ -78,6 +78,7 @@ final class AppState: ObservableObject {
     private(set) var workspacesRegistry:   WorkspacesRegistry?    // Phase 3
     private(set) var codingOrchestrator:   CodingOrchestrator?    // Phase 3
     private(set) var gitHubBridge:         GitHubBridge?          // Phase 5
+    private(set) var httpRemoteServer:     HTTPRemoteServer?      // Phase 6
     private(set) var mcpRegistry:          MCPRegistry?
     private(set) var skillsRegistry:   SkillsRegistry?
     private(set) var hooksEngine:      HooksEngine?
@@ -202,6 +203,13 @@ final class AppState: ObservableObject {
 
             // Phase 5: GitHub bridge (gh CLI wrapper)
             self.gitHubBridge = GitHubBridge()
+
+            // Phase 6: HTTP remote server (off by default; user enables in Settings)
+            let httpServer = HTTPRemoteServer()
+            httpServer.appState = self
+            self.httpRemoteServer = httpServer
+            // Register with RemoteInbox so HTTP messages flow through same pipeline
+            remoteInbox?.register(httpServer, for: .http)
 
             // 10. Skills Registry
             let skills = SkillsRegistry()

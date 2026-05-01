@@ -672,6 +672,9 @@ struct SettingsView: View {
             AuditTab()
                 .tabItem { Label("Audit", systemImage: "doc.text.magnifyingglass") }
                 .tag(7)
+            RemoteAccessTab()
+                .tabItem { Label("Remote", systemImage: "network") }
+                .tag(8)
         }
         .frame(width: 580, height: 600)
         .padding(8)
@@ -1428,6 +1431,124 @@ private struct AuditRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(Color(hex: "#1A1916").opacity(0.3))
+    }
+}
+
+// MARK: Remote Access tab
+
+private struct RemoteAccessTab: View {
+    @EnvironmentObject var appState: AppState
+    @State private var enabled:    Bool   = false
+    @State private var port:       String = "7421"
+    @State private var tokenMask:  String = "••••••••••••••••"
+    @State private var showToken:  Bool   = false
+    @State private var token:      String = ""
+    @State private var copied:     Bool   = false
+
+    var body: some View {
+        Form {
+            Section("HTTP Remote Server") {
+                Toggle("Enable server", isOn: $enabled)
+                    .onChange(of: enabled) { _, on in
+                        if on {
+                            if let srv = appState.httpRemoteServer {
+                                srv.port = UInt16(port) ?? 7421
+                                try? srv.start()
+                            }
+                        } else {
+                            appState.httpRemoteServer?.stop()
+                        }
+                    }
+
+                if let srv = appState.httpRemoteServer, srv.isRunning {
+                    LabeledContent("Status") {
+                        Label("Listening on :\(port)", systemImage: "antenna.radiowaves.left.and.right")
+                            .foregroundColor(.green)
+                            .font(.system(size: 11))
+                    }
+                } else {
+                    LabeledContent("Status", value: "Stopped")
+                }
+
+                LabeledContent("Port") {
+                    TextField("7421", text: $port)
+                        .frame(width: 70)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.custom("JetBrains Mono", size: 11))
+                }
+
+                Text("Bind to 127.0.0.1 only. Access from outside your Mac requires Tailscale.")
+                    .font(.system(size: 11)).foregroundColor(.secondary)
+            }
+
+            Section("Bearer Token") {
+                HStack {
+                    if showToken {
+                        Text(token.isEmpty ? "(none)" : token)
+                            .font(.custom("JetBrains Mono", size: 11))
+                            .textSelection(.enabled)
+                    } else {
+                        Text(tokenMask)
+                            .font(.custom("JetBrains Mono", size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button(showToken ? "Hide" : "Show") {
+                        if !showToken {
+                            token = KeychainHelper.get(.shiroRemoteToken) ?? HTTPRemoteServer.ensureToken()
+                        }
+                        showToken.toggle()
+                    }
+                    .font(.system(size: 11)).buttonStyle(.plain).foregroundColor(.secondary)
+
+                    Button("Copy") {
+                        let t = KeychainHelper.get(.shiroRemoteToken) ?? HTTPRemoteServer.ensureToken()
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(t, forType: .string)
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                    }
+                    .font(.system(size: 11)).buttonStyle(.plain)
+                    .foregroundColor(copied ? .green : .secondary)
+
+                    Button("Rotate") {
+                        token = HTTPRemoteServer.rotateToken()
+                        showToken = true
+                    }
+                    .font(.system(size: 11)).buttonStyle(.plain).foregroundColor(.orange)
+                }
+
+                Text("Include in every request: Authorization: Bearer <token>")
+                    .font(.system(size: 10)).foregroundColor(.secondary)
+            }
+
+            Section("Test (copy & run in Terminal)") {
+                let t = KeychainHelper.get(.shiroRemoteToken) ?? "YOUR_TOKEN"
+                let curlCmd = """
+curl -s -X POST http://127.0.0.1:\(port)/v1/prompt \\
+  -H 'Authorization: Bearer \(t)' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"text":"what time is it","sync":true}'
+"""
+                Text(curlCmd)
+                    .font(.custom("JetBrains Mono", size: 10))
+                    .foregroundColor(Color(hex: "#AAAAAA"))
+                    .textSelection(.enabled)
+            }
+
+            Section("iOS Shortcuts Setup") {
+                Text("See docs/REMOTE.md in the Shiro project for the full setup guide: Tailscale install, iOS Shortcut import, and voice integration.")
+                    .font(.system(size: 11)).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            enabled = appState.httpRemoteServer?.isRunning ?? false
+            if let srv = appState.httpRemoteServer {
+                port = "\(srv.port)"
+            }
+        }
     }
 }
 
