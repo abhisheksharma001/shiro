@@ -114,6 +114,24 @@ final class WorkspacesRegistry: ObservableObject {
         workspaces = try JSONDecoder().decode([Workspace].self, from: data)
     }
 
+    // MARK: - GitHub clone
+
+    /// Clone a GitHub repo by slug and add to registry.
+    func cloneFromGitHub(_ slug: String,
+                         into root: URL? = nil) async throws -> Workspace {
+        let repoName = slug.split(separator: "/").last.map(String.init) ?? slug
+        let dest = (root ?? URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Projects"))
+            .appendingPathComponent(repoName)
+
+        let gh = GitHubBridge()
+        try await gh.clone(slug: slug, to: dest)
+        await scan()    // refresh registry
+        return resolve(hint: repoName)
+            ?? Workspace(name: repoName, path: dest, isGitRepo: true,
+                         lastSeenAt: Date(), remoteOriginUrl: "https://github.com/\(slug)")
+    }
+
     // MARK: - Helpers
 
     private func shellOutput(_ cmd: String, args: [String]) async -> String {

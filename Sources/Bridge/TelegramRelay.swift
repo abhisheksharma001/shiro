@@ -310,13 +310,15 @@ Tap a button to decide ↓
             await notify("""
 👋 *Shiro is online.*
 
-Send me a message and I'll run it through the agent.
+Send me anything and I'll run it through the agent.
 
 *Commands:*
-`/status` — current model + last task
+`/status` — current model + task state
 `/model sonnet|opus|haiku` — switch model
 `/cancel` — stop running task
-`/code <task>` — launch Claude Code on a task _(coming in Phase 3)_
+`/code <task>` — plan + launch Claude Code in VS Code
+`/repos` — list your GitHub repos
+`/clone owner/repo` — clone a GitHub repo to ~/Projects
 """)
 
         case "/cancel":
@@ -407,6 +409,50 @@ Send me a message and I'll run it through the agent.
                 pendingPlans[plan.id] = plan
             } catch {
                 await notify("❌ Planning failed: \(error.localizedDescription)")
+            }
+
+        case "/repos":
+            guard let gh = appState?.gitHubBridge else {
+                await notify("❌ GitHubBridge not ready.")
+                return
+            }
+            await notify("🔍 _Fetching your GitHub repos…_")
+            do {
+                let repos = try await gh.listRepos(limit: 50)
+                if repos.isEmpty { await notify("No repos found."); return }
+                // Format into batches of 20 (Telegram message limit)
+                let lines = repos.map { r in
+                    let priv = r.isPrivate ? "🔒" : "📂"
+                    return "\(priv) `\(r.fullName)`"
+                }
+                // Split into chunks of 20 lines
+                let chunks = stride(from: 0, to: lines.count, by: 20).map {
+                    Array(lines[$0..<min($0 + 20, lines.count)])
+                }
+                for (i, chunk) in chunks.enumerated() {
+                    let header = i == 0 ? "*Your GitHub repos (\(repos.count) total):*\n" : ""
+                    await notify(header + chunk.joined(separator: "\n"))
+                }
+            } catch {
+                await notify("❌ \(error.localizedDescription)")
+            }
+
+        case "/clone":
+            let slug = args.trimmingCharacters(in: .whitespaces)
+            guard !slug.isEmpty else {
+                await notify("Usage: `/clone owner/repo`")
+                return
+            }
+            guard let wsr = appState?.workspacesRegistry else {
+                await notify("❌ WorkspacesRegistry not ready.")
+                return
+            }
+            await notify("⬇️ _Cloning `\(slug)`…_")
+            do {
+                let ws = try await wsr.cloneFromGitHub(slug)
+                await notify("✅ Cloned to `\(ws.path.path)`\n\nUse `/code <task>` to start working on it.")
+            } catch {
+                await notify("❌ Clone failed: \(error.localizedDescription)")
             }
 
         default:

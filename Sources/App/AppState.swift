@@ -77,6 +77,7 @@ final class AppState: ObservableObject {
     private(set) var remoteInbox:          RemoteInbox?           // Phase 2
     private(set) var workspacesRegistry:   WorkspacesRegistry?    // Phase 3
     private(set) var codingOrchestrator:   CodingOrchestrator?    // Phase 3
+    private(set) var gitHubBridge:         GitHubBridge?          // Phase 5
     private(set) var mcpRegistry:          MCPRegistry?
     private(set) var skillsRegistry:   SkillsRegistry?
     private(set) var hooksEngine:      HooksEngine?
@@ -198,6 +199,9 @@ final class AppState: ObservableObject {
             orch.appState   = self
             orch.workspaces = wsr
             self.codingOrchestrator = orch
+
+            // Phase 5: GitHub bridge (gh CLI wrapper)
+            self.gitHubBridge = GitHubBridge()
 
             // 10. Skills Registry
             let skills = SkillsRegistry()
