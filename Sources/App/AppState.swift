@@ -128,6 +128,7 @@ final class AppState: ObservableObject {
                let chatId = Config.telegramChatId {
                 let relay = TelegramRelay(token: token, chatId: chatId)
                 relay.consentGate  = gate
+                relay.appState     = self      // Phase 1: bidirectional chat
                 gate.telegramRelay = relay
                 relay.start()
                 self.telegramRelay = relay
@@ -430,6 +431,95 @@ final class AppState: ObservableObject {
         // Cap feed at 200 items
         if toolActivityFeed.count > 200 {
             toolActivityFeed.removeFirst(toolActivityFeed.count - 200)
+        }
+    }
+
+    // MARK: - Remote Prompt (Telegram / HTTP)
+
+    /// True while a remote prompt is currently running. Used to gate queuing.
+    @Published var isRemoteProcessing: Bool = false
+
+    /// Run a prompt from a remote source (Telegram, iOS Shortcuts, HTTP).
+    /// Streams reply chunks via the returned AsyncStream<String>.
+    /// The stream finishes when the turn completes or errors.
+    /// If another remote prompt is already running, the stream immediately
+    /// yields a "busy" message and finishes.
+    func runRemotePrompt(_ text: String, source: String) -> AsyncStream<String> {
+        AsyncStream { continuation in
+            Task { @MainActor [weak self] in
+                guard let self else { continuation.finish(); return }
+
+                guard !self.isRemoteProcessing else {
+                    continuation.yield("⚠️ Already running a task. Send `/cancel` to stop it first.")
+                    continuation.finish()
+                    return
+                }
+
+                guard let coordinator = self.agentCoordinator else {
+                    continuation.yield("❌ Agent not ready yet.")
+                    continuation.finish()
+                    return
+                }
+
+                self.isRemoteProcessing = true
+
+                // Resolve skills (e.g. /code → skill prompt)
+                var queryText             = text
+                var systemPromptOverride: String? = nil
+                if text.hasPrefix("/"), let registry = self.skillsRegistry,
+                   let resolved = registry.resolve(input: text) {
+                    queryText            = resolved.prompt
+                    systemPromptOverride = resolved.skill.systemPrompt
+                }
+
+                // Add to shared conversation so Mac window shows it too
+                self.conversationMessages.append(DisplayMessage(role: .user,
+                    content: "[\(source)] \(text)"))
+                self.conversationMessages.append(DisplayMessage(role: .assistant, content: ""))
+                self.isTypingMain = true
+                self.isProcessing = true
+                self.agentStatus  = .thinking
+
+                coordinator.onStreamingToken = { [weak self] token in
+                    guard let self else { return }
+                    if self.conversationMessages.last?.role == .assistant {
+                        let idx = self.conversationMessages.indices.last!
+                        self.conversationMessages[idx].content += token
+                    }
+                    continuation.yield(token)
+                }
+
+                coordinator.onTurnComplete = { [weak self] finalText in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.isTypingMain         = false
+                        self.isProcessing         = false
+                        self.isRemoteProcessing   = false
+                        self.agentStatus          = .idle
+                        coordinator.onStreamingToken = nil
+                        coordinator.onTurnComplete   = nil
+                        await self.refreshSubAgentSessions()
+                        continuation.finish()
+                    }
+                }
+
+                do {
+                    _ = try await coordinator.send(query: queryText,
+                                                   systemPrompt: systemPromptOverride)
+                } catch {
+                    self.isTypingMain       = false
+                    self.isProcessing       = false
+                    self.isRemoteProcessing = false
+                    self.agentStatus        = .error(error.localizedDescription)
+                    self.logError(source: "remote-\(source)", message: error.localizedDescription)
+                    if self.conversationMessages.last?.role == .assistant {
+                        let idx = self.conversationMessages.indices.last!
+                        self.conversationMessages[idx].content = "❌ \(error.localizedDescription)"
+                    }
+                    continuation.yield("❌ \(error.localizedDescription)")
+                    continuation.finish()
+                }
+            }
         }
     }
 

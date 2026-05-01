@@ -158,6 +158,18 @@ enum Config {
         UserDefaults.standard.set(mode.rawValue, forKey: "shiro.routeMode")
     }
 
+    // MARK: - Active model override (for /model Telegram command)
+
+    /// Optional model override set by the Telegram /model command.
+    /// nil = use backend default.
+    static var activeModel: String? {
+        UserDefaults.standard.string(forKey: "shiro.activeModel")
+    }
+
+    static func setActiveModel(_ model: String) {
+        UserDefaults.standard.set(model, forKey: "shiro.activeModel")
+    }
+
     /// Absolute path to the `claude` CLI binary if installed, else nil.
     /// Searched in order: $SHIRO_CLAUDE_PATH → ~/.local/bin → ~/.claude/local → /opt/homebrew/bin → /usr/local/bin → PATH.
     static var claudeCodeCLIPath: String? {
