@@ -32,6 +32,8 @@ final class TelegramRelay {
 
     /// callId → messageId of the Telegram message showing that approval request.
     private var pendingMessages: [String: Int] = [:]
+    /// planId → CodingPlan — stored while waiting for Telegram approve/cancel button.
+    private var pendingPlans: [String: CodingPlan] = [:]
     /// Last seen update_id from getUpdates (for offset tracking).
     private var updateOffset: Int = 0
     /// True while the poll loop should keep running.
@@ -217,14 +219,45 @@ Tap a button to decide ↓
 
     private func handleUpdate(_ update: [String: Any]) async {
 
-        // ── Inline-button callback (existing approval flow) ────────────────
+        // ── Inline-button callback ─────────────────────────────────────────
         if let callback = update["callback_query"] as? [String: Any],
            let data = callback["data"] as? String,
            let cbId = callback["id"] as? String {
             _ = try? await apiCall(method: "answerCallbackQuery", params: ["callback_query_id": cbId])
             let parts = data.split(separator: ":", maxSplits: 1).map(String.init)
             guard parts.count == 2 else { return }
-            let action = parts[0], callId = parts[1]
+            let action = parts[0], value = parts[1]
+
+            // ── Coding plan approval ──────────────────────────────────────
+            if action == "code_execute" || action == "code_cancel" {
+                guard let plan = pendingPlans.removeValue(forKey: value) else { return }
+                // Edit the plan preview message
+                if let msgId = pendingMessages.removeValue(forKey: "plan_\(value)") {
+                    let resultText = action == "code_execute"
+                        ? "✅ *Executing plan…*\nOpening VS Code + Claude Code."
+                        : "❌ *Cancelled.*"
+                    _ = try? await apiCall(method: "editMessageText", params: [
+                        "chat_id":    chatId,
+                        "message_id": msgId,
+                        "text":       resultText,
+                        "parse_mode": "Markdown"
+                    ])
+                }
+                if action == "code_execute" {
+                    Task { [weak self] in
+                        guard let orch = self?.appState?.codingOrchestrator else { return }
+                        do {
+                            try await orch.executePlan(plan)
+                            await self?.notify("✅ VS Code opened. Claude Code will start automatically when the workspace loads.")
+                        } catch {
+                            await self?.notify("❌ Execute failed: \(error.localizedDescription)")
+                        }
+                    }
+                }
+                return
+            }
+
+            // ── Consent gate approval (existing flow) ─────────────────────
             await MainActor.run { [weak self] in
                 guard let self, let gate = self.consentGate else { return }
                 let decision: ConsentGate.ApprovalDecision
@@ -235,7 +268,7 @@ Tap a button to decide ↓
                 case "always":  decision = .rememberAllow
                 default: return
                 }
-                gate.resolve(callId: callId, decision: decision, channel: "telegram")
+                gate.resolve(callId: value, decision: decision, channel: "telegram")
             }
             return
         }
@@ -316,12 +349,51 @@ Send me a message and I'll run it through the agent.
             await notify("✅ Model set to `\(resolved)`")
 
         case "/code":
-            // Placeholder — wired up properly in Phase 3
             if args.isEmpty {
                 await notify("Usage: `/code <task description>`")
-            } else {
-                await notify("⚙️ Coding orchestration coming in Phase 3. For now, running as a regular prompt...")
-                await handleIncomingText(args)
+                return
+            }
+            guard let orch = appState?.codingOrchestrator else {
+                await notify("❌ CodingOrchestrator not ready.")
+                return
+            }
+            await notify("⚙️ _Planning coding task…_")
+            do {
+                let plan = try await orch.plan(task: args)
+                let preview = """
+*Plan ready*
+📁 Project: `\(plan.workspaceName)`
+🌿 Branch: `\(plan.branchName)`
+⚙️ Mode: `\(plan.mode.rawValue)`
+💰 Budget: $\(String(format: "%.2f", plan.maxCostUSD))
+
+\(plan.prompt.prefix(300))
+"""
+                // Send plan + inline approve/skip buttons
+                let keyboard: [String: Any] = [
+                    "inline_keyboard": [[
+                        ["text": "✅ Execute", "callback_data": "code_execute:\(plan.id)"],
+                        ["text": "❌ Cancel",  "callback_data": "code_cancel:\(plan.id)"]
+                    ]]
+                ]
+                let resp = try? await apiCall(method: "sendMessage", params: [
+                    "chat_id":      chatId,
+                    "text":         preview,
+                    "parse_mode":   "Markdown",
+                    "reply_markup": keyboard
+                ])
+                // Store plan in orchestrator for callback resolution
+                await MainActor.run {
+                    orch.activePlans[plan.branchName] = plan
+                    // Store for button callback lookup: reuse pendingMessages with plan.id key
+                }
+                if let msgId = (resp?["result"] as? [String: Any])?["message_id"] as? Int {
+                    pendingMessages["plan_\(plan.id)"] = msgId
+                }
+                // Store plan reference for callback
+                pendingPlans[plan.id] = plan
+            } catch {
+                await notify("❌ Planning failed: \(error.localizedDescription)")
             }
 
         default:

@@ -381,6 +381,55 @@ struct FloatingBarView: View {
         guard !text.isEmpty, let coordinator = appState.agentCoordinator else { return }
         inputText = ""
 
+        // ── /code <task> — hand off to CodingOrchestrator ─────────────────
+        if text.lowercased().hasPrefix("/code") {
+            let task = String(text.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+            if task.isEmpty {
+                appState.conversationMessages.append(
+                    DisplayMessage(role: .system, content: "Usage: /code <task description>"))
+                return
+            }
+            appState.conversationMessages.append(
+                DisplayMessage(role: .user, content: text, badge: "[/code]"))
+            appState.conversationMessages.append(
+                DisplayMessage(role: .assistant, content: "⚙️ Planning coding task…"))
+            Task {
+                do {
+                    guard let orch = appState.codingOrchestrator else {
+                        throw CodingOrchestratorError.noWorkspace("Orchestrator not ready")
+                    }
+                    let plan = try await orch.plan(task: task)
+                    // Update assistant bubble with plan preview
+                    if appState.conversationMessages.last?.role == .assistant {
+                        let idx = appState.conversationMessages.indices.last!
+                        appState.conversationMessages[idx].content = """
+**Plan**
+Project: \(plan.workspaceName)
+Branch: `\(plan.branchName)`
+Mode: \(plan.mode.rawValue)
+Budget: $\(String(format: "%.2f", plan.maxCostUSD))
+
+\(plan.prompt)
+
+_Opening VS Code…_
+"""
+                    }
+                    try await orch.executePlan(plan)
+                    if appState.conversationMessages.last?.role == .assistant {
+                        let idx = appState.conversationMessages.indices.last!
+                        appState.conversationMessages[idx].content += "\n✅ VS Code opened. Claude Code will start automatically."
+                    }
+                } catch {
+                    appState.logError(source: "CodingOrchestrator", message: error.localizedDescription)
+                    if appState.conversationMessages.last?.role == .assistant {
+                        let idx = appState.conversationMessages.indices.last!
+                        appState.conversationMessages[idx].content = "❌ \(error.localizedDescription)"
+                    }
+                }
+            }
+            return
+        }
+
         var queryText              = text
         var systemPromptOverride: String? = nil
 

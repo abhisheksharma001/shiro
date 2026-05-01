@@ -74,8 +74,10 @@ final class AppState: ObservableObject {
     private(set) var memoryStore:      MemoryStore?
     private(set) var ingestor:         Ingestor?
     private(set) var telegramRelay:    TelegramRelay?
-    private(set) var remoteInbox:      RemoteInbox?       // Phase 2
-    private(set) var mcpRegistry:      MCPRegistry?
+    private(set) var remoteInbox:          RemoteInbox?           // Phase 2
+    private(set) var workspacesRegistry:   WorkspacesRegistry?    // Phase 3
+    private(set) var codingOrchestrator:   CodingOrchestrator?    // Phase 3
+    private(set) var mcpRegistry:          MCPRegistry?
     private(set) var skillsRegistry:   SkillsRegistry?
     private(set) var hooksEngine:      HooksEngine?
     private(set) var healthMonitor:    BridgeHealthMonitor?
@@ -186,6 +188,16 @@ final class AppState: ObservableObject {
 
             // 9. MCP Registry
             self.mcpRegistry = MCPRegistry()
+
+            // 9b. Workspaces registry + Coding orchestrator (Phase 3)
+            let wsr = WorkspacesRegistry()
+            self.workspacesRegistry = wsr
+            Task.detached(priority: .background) { await wsr.scan() }
+
+            let orch = CodingOrchestrator()
+            orch.appState   = self
+            orch.workspaces = wsr
+            self.codingOrchestrator = orch
 
             // 10. Skills Registry
             let skills = SkillsRegistry()
