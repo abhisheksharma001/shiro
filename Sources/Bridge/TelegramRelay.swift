@@ -245,12 +245,23 @@ Tap a button to decide ↓
                 }
                 if action == "code_execute" {
                     Task { [weak self] in
-                        guard let orch = self?.appState?.codingOrchestrator else { return }
+                        guard let self, let orch = self.appState?.codingOrchestrator else { return }
+                        // Send a streaming placeholder message and capture its id
+                        var streamMsgId: Int? = nil
+                        if let resp = try? await self.apiCall(method: "sendMessage", params: [
+                            "chat_id":    self.chatId,
+                            "text":       "⏳ _Running headless…_",
+                            "parse_mode": "Markdown"
+                        ]), let result = resp["result"] as? [String: Any] {
+                            streamMsgId = result["message_id"] as? Int
+                        }
+                        // Wire sink so ClaudeCodeRunner streams back to this Telegram chat
+                        orch.remoteSink       = self
+                        orch.streamReplyToken = streamMsgId.map(String.init)
                         do {
                             try await orch.executePlan(plan)
-                            await self?.notify("✅ VS Code opened. Claude Code will start automatically when the workspace loads.")
                         } catch {
-                            await self?.notify("❌ Execute failed: \(error.localizedDescription)")
+                            await self.notify("❌ Execute failed: \(error.localizedDescription)")
                         }
                     }
                 }
@@ -319,6 +330,8 @@ Send me a message and I'll run it through the agent.
                 appState.isProcessing       = false
                 appState.isTypingMain       = false
                 appState.agentStatus        = .idle
+                // Also cancel any active headless runner (Phase 4)
+                Task { await appState.codingOrchestrator?.cancelHeadless() }
             }
             await notify("🛑 Task cancelled.")
 

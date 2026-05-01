@@ -29,6 +29,13 @@ final class CodingOrchestrator: ObservableObject {
     weak var appState: AppState?
     var workspaces: WorkspacesRegistry?
 
+    /// Active runner for headless mode — kept so /cancel can kill it.
+    private var activeRunner: ClaudeCodeRunner?
+    /// Reply token to stream headless output back (Telegram message_id as string).
+    var streamReplyToken: String?
+    /// Sink to deliver headless streaming events through RemoteInbox.
+    weak var remoteSink: RemoteReplySink?
+
     private let defaultMaxCost: Double = 2.00
     private let encoder = JSONEncoder()
 
@@ -90,9 +97,11 @@ final class CodingOrchestrator: ObservableObject {
             try openInVSCode(at: worktreeURL)
         }
 
-        // Note: for headless mode (Phase 4), ClaudeCodeRunner will be used here.
-        // For interactive mode (Phase 3 MVP), VS Code opens and user continues there.
-        // The .vscode/tasks.json handles launching claude automatically.
+        // 4. For headless mode: spawn ClaudeCodeRunner and stream output.
+        //    For interactive mode: VS Code + tasks.json handles it (see above).
+        if plan.mode == .headless || plan.mode == .background {
+            try await runHeadless(plan: plan, worktreeURL: worktreeURL)
+        }
 
         print("[CodingOrchestrator] plan '\(plan.branchName)' launched — worktree: \(worktreeURL.path)")
     }
@@ -197,6 +206,72 @@ final class CodingOrchestrator: ObservableObject {
         if code != 0 {
             throw CodingOrchestratorError.vscodeFailed("code CLI failed: \(err)")
         }
+    }
+
+    // MARK: - Headless runner
+
+    private func runHeadless(plan: CodingPlan, worktreeURL: URL) async throws {
+        let runner = ClaudeCodeRunner()
+        self.activeRunner = runner
+
+        let sink    = remoteSink
+        let token   = streamReplyToken
+        var textAcc = ""
+        var cost    = 0.0
+
+        let stream = await runner.run(
+            cwd:          worktreeURL,
+            prompt:       plan.prompt,
+            allowedTools: plan.allowedTools,
+            maxTurns:     50,
+            budgetUSD:    plan.maxCostUSD
+        )
+
+        for await event in stream {
+            switch event {
+            case .assistantText(let text):
+                textAcc += text
+                await sink?.streamChunk(text, replyToken: token)
+
+            case .toolUse(let name, _):
+                let msg = "\n🔧 `\(name)`"
+                textAcc += msg
+                await sink?.streamChunk(msg, replyToken: token)
+
+            case .usage(_, _, let c) where c > 0:
+                cost = c
+                if c > plan.maxCostUSD {
+                    let errMsg = "\n⚠️ Budget exceeded ($\(String(format: "%.4f", c)) > $\(plan.maxCostUSD))"
+                    await sink?.streamError(errMsg, replyToken: token)
+                    await runner.cancel()
+                    self.activeRunner = nil
+                    appState?.logError(source: "CodingOrchestrator", message: errMsg)
+                    throw CodingOrchestratorError.headlessFailed(errMsg)
+                }
+
+            case .done(let result):
+                let summary = "\n\n✅ Done in \(String(format: "%.0f", result.durationSeconds))s"
+                    + (cost > 0 ? " · $\(String(format: "%.4f", cost))" : "")
+                textAcc += summary
+                await sink?.streamFinished(replyToken: token, finalText: textAcc)
+                self.activeRunner = nil
+
+            case .error(let msg):
+                await sink?.streamError("❌ \(msg)", replyToken: token)
+                appState?.logError(source: "ClaudeCodeRunner", message: msg)
+                self.activeRunner = nil
+
+            default:
+                break
+            }
+        }
+
+        activePlans.removeValue(forKey: plan.branchName)
+    }
+
+    func cancelHeadless() async {
+        await activeRunner?.cancel()
+        activeRunner = nil
     }
 
     // MARK: - LLM prompt refinement
