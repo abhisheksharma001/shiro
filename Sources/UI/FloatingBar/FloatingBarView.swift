@@ -111,8 +111,9 @@ struct FloatingBarView: View {
             }
 
             // Approval overlays float above the bar
+            // Pass stt so voice keywords ("approve"/"deny"/"always"/"never") resolve cards
             if let gate = appState.consentGate, !gate.pendingApprovals.isEmpty {
-                ApprovalQueueOverlay(gate: gate)
+                ApprovalQueueOverlay(gate: gate, stt: appState.stt)
             }
 
             ZStack {

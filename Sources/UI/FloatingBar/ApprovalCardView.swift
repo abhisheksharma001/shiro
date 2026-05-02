@@ -16,6 +16,8 @@ import SwiftUI
 struct ApprovalCardView: View {
     let approval: ConsentGate.PendingApproval
     let onDecide: (ConsentGate.ApprovalDecision) -> Void
+    /// Optional STT service — when non-nil and isRecording, voice keywords resolve the card.
+    var stt: STTService? = nil
 
     private let bg       = Color(hex: "#0D0D0D")
     private let amber    = Color(hex: "#FFB800")
@@ -25,8 +27,10 @@ struct ApprovalCardView: View {
     private let textC    = Color(hex: "#E8E8E8")
     private let subtext  = Color(hex: "#888888")
 
-    @State private var showFullInput: Bool = false
-    @State private var secondsLeft: Int = Int(Config.approvalTimeoutSeconds)
+    @State private var showFullInput:    Bool = false
+    @State private var secondsLeft:      Int  = Int(Config.approvalTimeoutSeconds)
+    /// Last voice-resolved keyword shown briefly in the UI, cleared after 2s.
+    @State private var voiceHint:        String? = nil
 
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -44,6 +48,31 @@ struct ApprovalCardView: View {
                     .foregroundColor(.black)
                     .tracking(1.5)
                 Spacer()
+                // Voice indicator — shows only when STT is live
+                if let stt, stt.isRecording {
+                    HStack(spacing: 4) {
+                        if let hint = voiceHint {
+                            Text(hint.uppercased())
+                                .font(.custom("JetBrains Mono", size: 9))
+                                .fontWeight(.bold)
+                                .foregroundColor(.black)
+                                .transition(.opacity)
+                        } else {
+                            Image(systemName: "mic.fill")
+                                .font(.system(size: 9))
+                                .foregroundColor(.black)
+                                .symbolEffect(.pulse)
+                            Text("VOICE ON")
+                                .font(.custom("JetBrains Mono", size: 9))
+                                .fontWeight(.bold)
+                                .foregroundColor(.black)
+                        }
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.black.opacity(0.2))
+                    .cornerRadius(3)
+                }
                 riskBadge
             }
             .padding(.horizontal, 14)
@@ -236,6 +265,38 @@ struct ApprovalCardView: View {
         .cornerRadius(10)
         .shadow(color: amber.opacity(0.15), radius: 20)
         .frame(width: 380)
+        // Voice approval: observe STT lastSegment for keywords
+        .onChange(of: stt?.lastSegment ?? "") { _, segment in
+            handleVoiceSegment(segment)
+        }
+    }
+
+    // MARK: - Voice approval
+
+    /// Checks the transcribed segment for approval keywords.
+    /// Supported: "approve"/"yes" → .approved | "deny"/"no" → .denied |
+    ///            "always" → .rememberAllow | "never" → .rememberDeny
+    private func handleVoiceSegment(_ segment: String) {
+        guard let stt, stt.isRecording, !segment.isEmpty else { return }
+        let lower = segment.lowercased()
+        let decision: ConsentGate.ApprovalDecision?
+        let hint: String
+        if lower.contains("always") {
+            decision = .rememberAllow; hint = "ALWAYS ✓"
+        } else if lower.contains("never") {
+            decision = .rememberDeny;  hint = "NEVER ✗"
+        } else if lower.contains("approve") || lower.hasSuffix(" yes") || lower == "yes" {
+            decision = .approved;      hint = "APPROVED ✓"
+        } else if lower.contains("deny") || lower.hasSuffix(" no") || lower == "no" {
+            decision = .denied(reason: "Voice denial"); hint = "DENIED ✗"
+        } else {
+            return  // not a keyword — ignore
+        }
+        // Show the hint briefly, then resolve
+        withAnimation { voiceHint = hint }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            if let d = decision { onDecide(d) }
+        }
     }
 
     // MARK: - Helpers
@@ -361,13 +422,15 @@ private struct VetoToastCard: View {
 /// Renders all pending approvals as a stacked overlay above the floating bar.
 struct ApprovalQueueOverlay: View {
     @ObservedObject var gate: ConsentGate
+    /// Passed through to each card for voice-keyword resolution.
+    var stt: STTService? = nil
 
     var body: some View {
         VStack(spacing: 8) {
             ForEach(gate.pendingApprovals) { approval in
-                ApprovalCardView(approval: approval) { decision in
+                ApprovalCardView(approval: approval, onDecide: { decision in
                     gate.resolve(callId: approval.callId, decision: decision)
-                }
+                }, stt: stt)
                 .transition(.asymmetric(
                     insertion: .move(edge: .top).combined(with: .opacity),
                     removal:   .scale(scale: 0.95).combined(with: .opacity)

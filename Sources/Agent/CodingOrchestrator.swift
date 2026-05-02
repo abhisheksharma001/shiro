@@ -101,6 +101,14 @@ final class CodingOrchestrator: ObservableObject {
             Config.setActiveModel(model)
         }
 
+        // Apply workspace auto-approve-risk override to ConsentGate.
+        // This persists until the plan finishes (runHeadless defer block clears it).
+        if let riskStr = preset?.autoApproveRisk,
+           let tier = ToolRisk(rawValue: riskStr) {
+            appState?.consentGate?.workspaceAutoApproveRisk = tier
+            print("[CodingOrchestrator] workspace auto_approve_risk: \(riskStr)")
+        }
+
         return CodingPlan(
             id:                   UUID().uuidString,
             workspaceName:        ws.name,
@@ -242,7 +250,11 @@ final class CodingOrchestrator: ObservableObject {
 
     private func runHeadless(plan: CodingPlan, worktreeURL: URL) async throws {
         // [B7-fix] Always remove the plan from activePlans — even on early throw.
-        defer { activePlans.removeValue(forKey: plan.branchName) }
+        // Also clear any workspace auto-approve-risk override that was set in buildPlan().
+        defer {
+            activePlans.removeValue(forKey: plan.branchName)
+            appState?.consentGate?.workspaceAutoApproveRisk = nil
+        }
 
         let runner = ClaudeCodeRunner()
         self.activeRunner = runner

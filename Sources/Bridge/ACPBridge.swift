@@ -147,14 +147,20 @@ struct AnyCodableLeaf: Decodable {
 
 // MARK: - Consent Gate
 
-enum ToolRisk: String {
+enum ToolRisk: String, Comparable {
     case low, med, high
 
     /// Consent Gate policy:
     /// low  → auto-approve silently
-    /// med  → toast with 3-second veto window (not yet implemented — auto-approve for MVP)
+    /// med  → toast with 3-second veto window
     /// high → blocking ApprovalCard
     var requiresExplicitApproval: Bool { self == .high }
+
+    // Comparable conformance: low < med < high
+    private var order: Int {
+        switch self { case .low: return 0; case .med: return 1; case .high: return 2 }
+    }
+    static func < (lhs: ToolRisk, rhs: ToolRisk) -> Bool { lhs.order < rhs.order }
 }
 
 // MARK: - ACPBridge Events (published to AgentCoordinator / UI)

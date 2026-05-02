@@ -86,6 +86,12 @@ final class ConsentGate: ObservableObject {
     // [A4-fix] Store timeout tasks so they can be cancelled when the user resolves early.
     private var timeoutTasks:    [String: Task<Void, Never>] = [:]
 
+    /// Per-workspace auto-approve risk threshold (from .shiro/workspace.toml).
+    /// When non-nil, actions at or below this risk level are auto-approved without
+    /// showing a veto toast. CodingOrchestrator sets this when a plan starts and
+    /// clears it (sets to nil) when the plan finishes.
+    var workspaceAutoApproveRisk: ToolRisk? = nil
+
     // Veto results from the 3-second medium-risk toast.
     private var vetoResults: [String: ApprovalDecision] = [:]
 
@@ -172,7 +178,17 @@ final class ConsentGate: ObservableObject {
             break
         }
 
-        // 2. Risk-based routing.
+        // 2a. Workspace preset override: if the active workspace's auto_approve_risk
+        // covers this tool's risk level, auto-approve without showing any UI.
+        // Example: auto_approve_risk = "med" silently approves both .low and .med tools.
+        if let wsThreshold = workspaceAutoApproveRisk, risk <= wsThreshold {
+            await audit(callId: callId, sessionKey: sessionKey, toolName: toolName,
+                        input: input, risk: risk, decision: "auto_approved", channel: "workspace_preset",
+                        justification: "workspace.toml auto_approve_risk=\(wsThreshold.rawValue)")
+            return .approved
+        }
+
+        // 2b. Risk-based routing.
         switch risk {
         case .low:
             await audit(callId: callId, sessionKey: sessionKey, toolName: toolName,
@@ -396,7 +412,7 @@ final class ConsentGate: ObservableObject {
         risk:          ToolRisk,
         justification: String?
     ) async {
-        var toast = VetoToast(id: callId, toolName: toolName)
+        let toast = VetoToast(id: callId, toolName: toolName)
         activeVetoToasts.append(toast)
 
         // Countdown: tick 3 times then remove. [C8-fix] Use .seconds() not nanoseconds.
