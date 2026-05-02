@@ -183,40 +183,27 @@ final class CodingOrchestrator: ObservableObject {
 
         let tasksURL = vscodeDir.appendingPathComponent("tasks.json")
 
-        // Escape the prompt for JSON — use JSONEncoder to get safe string
-        let escapedPrompt: String
-        if let data = try? JSONEncoder().encode(prompt),
-           let s = String(data: data, encoding: .utf8) {
-            // JSONEncoder wraps in quotes — strip them
-            escapedPrompt = String(s.dropFirst().dropLast())
-        } else {
-            escapedPrompt = prompt.replacingOccurrences(of: "\"", with: "\\\"")
-        }
-
-        let tasksJSON = """
-{
-  "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "Shiro: Run Claude Code",
-      "type": "shell",
-      "command": "claude",
-      "args": ["\(escapedPrompt)"],
-      "presentation": {
-        "echo": true,
-        "reveal": "always",
-        "focus": true,
-        "panel": "new"
-      },
-      "runOptions": {
-        "runOn": "folderOpen"
-      },
-      "problemMatcher": []
-    }
-  ]
-}
-"""
-        try tasksJSON.write(to: tasksURL, atomically: true, encoding: .utf8)
+        // [C2-fix] Build tasks.json via JSONSerialization so all special chars (newlines,
+        // tabs, backslashes, control chars) are correctly escaped. Manual string interpolation
+        // was incomplete and produced invalid JSON for multi-line prompts.
+        let task: [String: Any] = [
+            "label":   "Shiro: Run Claude Code",
+            "type":    "shell",
+            "command": "claude",
+            "args":    [prompt],
+            "presentation": [
+                "echo":   true,
+                "reveal": "always",
+                "focus":  true,
+                "panel":  "new"
+            ] as [String: Any],
+            "runOptions":     ["runOn": "folderOpen"],
+            "problemMatcher": [] as [Any]
+        ]
+        let taskObj: [String: Any] = ["version": "2.0.0", "tasks": [task]]
+        let jsonData = try JSONSerialization.data(withJSONObject: taskObj,
+                                                  options: [.prettyPrinted, .sortedKeys])
+        try jsonData.write(to: tasksURL)
         print("[CodingOrchestrator] .vscode/tasks.json written at \(tasksURL.path)")
     }
 
@@ -232,10 +219,16 @@ final class CodingOrchestrator: ObservableObject {
         guard let codePath = codePaths.first(where: {
             FileManager.default.isExecutableFile(atPath: $0)
         }) else {
-            // Fallback: open via 'open -a "Visual Studio Code"'
+            // [B1-fix] Verify the app bundle actually exists before using `open -a`.
+            let bundlePath = "/Applications/Visual Studio Code.app"
+            guard FileManager.default.fileExists(atPath: bundlePath) else {
+                throw CodingOrchestratorError.vscodeFailed(
+                    "VS Code not found. Install it from https://code.visualstudio.com and run: " +
+                    "ln -s '/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code' /usr/local/bin/code")
+            }
             let (_, err, code) = shell("open", args: ["-a", "Visual Studio Code", path.path])
             if code != 0 {
-                throw CodingOrchestratorError.vscodeFailed("VS Code not found. Install it and run: ln -s '/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code' /usr/local/bin/code")
+                throw CodingOrchestratorError.vscodeFailed("open -a 'Visual Studio Code' failed: \(err)")
             }
             return
         }
@@ -248,6 +241,9 @@ final class CodingOrchestrator: ObservableObject {
     // MARK: - Headless runner
 
     private func runHeadless(plan: CodingPlan, worktreeURL: URL) async throws {
+        // [B7-fix] Always remove the plan from activePlans — even on early throw.
+        defer { activePlans.removeValue(forKey: plan.branchName) }
+
         let runner = ClaudeCodeRunner()
         self.activeRunner = runner
 
@@ -270,7 +266,7 @@ final class CodingOrchestrator: ObservableObject {
                 textAcc += text
                 await sink?.streamChunk(text, replyToken: token)
 
-            case .toolUse(let name, _):
+            case .toolUse(let name, _):   // inputJSON not needed here
                 let msg = "\n🔧 `\(name)`"
                 textAcc += msg
                 await sink?.streamChunk(msg, replyToken: token)
@@ -310,8 +306,7 @@ final class CodingOrchestrator: ObservableObject {
                 break
             }
         }
-
-        activePlans.removeValue(forKey: plan.branchName)
+        // activePlans cleanup handled by defer at top of function.
     }
 
     func cancelHeadless() async {
@@ -513,7 +508,14 @@ Task: \(task)
         let errPipe = Pipe()
         p.standardOutput = outPipe
         p.standardError  = errPipe
-        try? p.run()
+        // [C7-fix] Propagate launch errors instead of silently returning code 0.
+        do {
+            try p.run()
+        } catch {
+            let msg = "Failed to launch \(cmd): \(error.localizedDescription)"
+            print("[CodingOrchestrator] shell error: \(msg)")
+            return ("", msg, -1)
+        }
         p.waitUntilExit()
         let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""

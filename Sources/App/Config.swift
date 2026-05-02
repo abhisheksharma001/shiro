@@ -81,7 +81,12 @@ enum Config {
         do {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         } catch {
-            // Last resort: temp dir. Keeps the app bootable so the error surfaces in a log.
+            // [C11-fix] Log the error prominently — silently falling back to tmp means
+            // all user data (conversations, approvals, cost records) is ephemeral and
+            // gets wiped by macOS on the next cleanup. Better to surface this immediately.
+            print("⚠️ [Shiro] CRITICAL: Cannot create DB directory at \(dir.path) — \(error.localizedDescription)")
+            print("⚠️ [Shiro] Check ~/Library/Application Support permissions. Falling back to tmp (NOT persistent).")
+            // Still fall back so the app stays bootable; bridge will show .offline status.
             let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("Shiro", isDirectory: true)
             try? fm.createDirectory(at: tmp, withIntermediateDirectories: true)
@@ -222,7 +227,11 @@ enum Config {
                 (String($0) as NSString).expandingTildeInPath
             }
         }
-        return [NSHomeDirectory()]
+        // [C3-fix] Default to ~/Projects only, not the entire $HOME.
+        // Full home access exposes ~/.ssh, ~/.aws, ~/Documents etc. to the subprocess.
+        // The user can grant more in Settings → Route → "Grant full ~/ access".
+        let projectsDir = (NSHomeDirectory() as NSString).appendingPathComponent("Projects")
+        return [projectsDir]
     }
 
     static func setAllowedDirectories(_ dirs: [String]) {

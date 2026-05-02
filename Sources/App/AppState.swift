@@ -222,9 +222,13 @@ final class AppState: ObservableObject {
             remoteInbox?.register(httpServer, for: .http)
 
             // 10. Skills Registry
+            // [B2/B3-fix] Wire skillsRegistry to ALL router types, not just acpBridge.
+            // Also: skillsRegistry was set after buildRouter, so acpBridge.skillsRegistry
+            // was nil during the first bridge launch. Now rewireRouter sets it too (see below).
             let skills = SkillsRegistry()
             self.skillsRegistry = skills
-            acpBridge?.skillsRegistry = skills
+            acpBridge?.skillsRegistry       = skills
+            claudeCodeRouter?.skillsRegistry = skills
 
             // 11. Vector RAG — only attempt embeddings when LM Studio is actually up
             let embeddingSvc = EmbeddingService(lmStudio: lm)
@@ -479,6 +483,8 @@ final class AppState: ObservableObject {
 
     /// True while a remote prompt is currently running. Used to gate queuing.
     @Published var isRemoteProcessing: Bool = false
+    // [C10-fix] Generation counter: stale callbacks compare against this and self-invalidate.
+    var currentCallbackGeneration: UUID = UUID()
 
     /// Run a prompt from a remote source (Telegram, iOS Shortcuts, HTTP).
     /// Streams reply chunks via the returned AsyncStream<String>.
@@ -521,18 +527,26 @@ final class AppState: ObservableObject {
                 self.isProcessing = true
                 self.agentStatus  = .thinking
 
-                coordinator.onStreamingToken = { [weak self] token in
-                    guard let self else { return }
-                    if self.conversationMessages.last?.role == .assistant {
-                        let idx = self.conversationMessages.indices.last!
-                        self.conversationMessages[idx].content += token
+                // [C10-fix] Use a generation counter to invalidate stale callbacks.
+                let generation = UUID()
+                self.currentCallbackGeneration = generation
+
+                // [A8-fix] All @Published mutations MUST happen on MainActor. The bridge
+                // calls onStreamingToken from a background thread — wrap in Task { @MainActor }.
+                coordinator.onStreamingToken = { [weak self, generation] token in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.currentCallbackGeneration == generation else { return }
+                        if self.conversationMessages.last?.role == .assistant {
+                            let idx = self.conversationMessages.indices.last!
+                            self.conversationMessages[idx].content += token
+                        }
+                        continuation.yield(token)
                     }
-                    continuation.yield(token)
                 }
 
-                coordinator.onTurnComplete = { [weak self] finalText in
+                coordinator.onTurnComplete = { [weak self, generation] finalText in
                     Task { @MainActor [weak self] in
-                        guard let self else { return }
+                        guard let self, self.currentCallbackGeneration == generation else { return }
                         self.isTypingMain         = false
                         self.isProcessing         = false
                         self.isRemoteProcessing   = false
@@ -573,7 +587,10 @@ final class AppState: ObservableObject {
         if isProcessing {
             agentCoordinator?.bridge?.interrupt(sessionKey: "main")
             acpBridge?.interrupt(sessionKey: "main")
-            // Drop streaming callbacks so any pending tokens are discarded.
+            // [B9-fix] Also interrupt the ClaudeCodeRouter when in claudeCode mode.
+            claudeCodeRouter?.interrupt(sessionKey: "main")
+            // Invalidate callbacks so streaming tokens don't re-populate the cleared conversation.
+            currentCallbackGeneration = UUID()
             agentCoordinator?.onStreamingToken = nil
             agentCoordinator?.onTurnComplete   = nil
         }

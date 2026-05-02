@@ -82,7 +82,9 @@ final class ConsentGate: ObservableObject {
     /// Optional Telegram relay for remote approval when not at the Mac.
     var telegramRelay: TelegramRelay?
     /// Tracks which channel resolved each callId, so audit logs the right channel.
-    private var resolveChannel: [String: String] = [:]
+    private var resolveChannel:  [String: String] = [:]
+    // [A4-fix] Store timeout tasks so they can be cancelled when the user resolves early.
+    private var timeoutTasks:    [String: Task<Void, Never>] = [:]
 
     // Veto results from the 3-second medium-risk toast.
     private var vetoResults: [String: ApprovalDecision] = [:]
@@ -251,17 +253,20 @@ final class ConsentGate: ObservableObject {
                 }
             }
 
-            // Timeout watchdog — 5 minutes.
+            // [A4-fix] Store the timeout task so resolve() can cancel it before the timer fires.
+            // [C8-fix] Use Task.sleep(for:) with Duration — avoids UInt64 overflow for large intervals.
             let timeout = Config.approvalTimeoutSeconds
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                guard let self else { return }
+            let timeoutTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(timeout))
+                guard let self, !Task.isCancelled else { return }
                 if let idx = self.pendingApprovals.firstIndex(where: { $0.callId == callId }) {
                     self.pendingApprovals.remove(at: idx)
                     self.resolveChannel[callId] = "timeout"
+                    self.timeoutTasks.removeValue(forKey: callId)
                     resumer.resume(.denied(reason: "Approval timed out after \(Int(timeout))s"))
                 }
             }
+            timeoutTasks[callId] = timeoutTask
         }
 
         let channel = resolveChannel.removeValue(forKey: callId) ?? "ui"
@@ -288,7 +293,14 @@ final class ConsentGate: ObservableObject {
         if case .rememberAllow = decision {
             await persistPolicy(toolName: toolName, policy: "always_allow")
         }
-        return decision
+
+        // [B6-fix] Map persistent-policy decisions to their effective action so callers
+        // that check `== .approved` work correctly (rememberAllow means approved this time too).
+        switch decision {
+        case .rememberAllow: return .approved
+        case .rememberDeny:  return .denied(reason: "Always-deny policy set for \(toolName)")
+        default:             return decision
+        }
     }
 
     // MARK: - Resolve from UI
@@ -297,6 +309,8 @@ final class ConsentGate: ObservableObject {
     /// `channel` is "ui" (default) or "telegram" — recorded in the audit log.
     func resolve(callId: String, decision: ApprovalDecision, channel: String = "ui") {
         guard let idx = pendingApprovals.firstIndex(where: { $0.callId == callId }) else { return }
+        // [A4-fix] Cancel the timeout watchdog immediately so it doesn't race.
+        timeoutTasks.removeValue(forKey: callId)?.cancel()
         resolveChannel[callId] = channel
         let approval = pendingApprovals.remove(at: idx)
         approval.continuation.resume(decision)
@@ -385,14 +399,13 @@ final class ConsentGate: ObservableObject {
         var toast = VetoToast(id: callId, toolName: toolName)
         activeVetoToasts.append(toast)
 
-        // Countdown: tick 3 times then remove.
+        // Countdown: tick 3 times then remove. [C8-fix] Use .seconds() not nanoseconds.
         for i in stride(from: 3, through: 1, by: -1) {
             if let idx = activeVetoToasts.firstIndex(where: { $0.id == callId }) {
                 activeVetoToasts[idx].secondsLeft = i
             }
-            // Check if already vetoed (user tapped before timeout)
             if vetoResults[callId] != nil { break }
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            try? await Task.sleep(for: .seconds(1))
         }
 
         activeVetoToasts.removeAll { $0.id == callId }

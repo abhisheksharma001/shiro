@@ -4,7 +4,8 @@ import Foundation
 
 enum ClaudeEvent: Sendable {
     case assistantText(String)
-    case toolUse(name: String, input: [String: Any])
+    // [A1-fix] [String: Any] is non-Sendable. Send JSON string instead; callers decode if needed.
+    case toolUse(name: String, inputJSON: String)
     case toolResult(name: String, output: String, isError: Bool)
     case usage(inputTokens: Int, outputTokens: Int, costUSD: Double)
     case sessionId(String)
@@ -91,17 +92,19 @@ actor ClaudeCodeRunner {
         }
 
         let proc = Process()
-        proc.executableURL      = URL(fileURLWithPath: cli)
-        proc.arguments          = args
+        proc.executableURL       = URL(fileURLWithPath: cli)
+        proc.arguments           = args
         proc.currentDirectoryURL = cwd
 
-        // Inherit env so existing claude auth is picked up
+        // Inherit env so existing claude auth (OAuth / credentials file) is picked up.
+        // We intentionally pass ANTHROPIC_API_KEY through so BYOK users also work.
+        // [C1-fix] Removed the API key strip — the CLI needs it for BYOK mode.
         var env = ProcessInfo.processInfo.environment
-        env.removeValue(forKey: "ANTHROPIC_API_KEY")
-        env.removeValue(forKey: "ANTHROPIC_BASE_URL")
         if let k = KeychainHelper.get(.githubToken),      !k.isEmpty { env["GITHUB_PERSONAL_ACCESS_TOKEN"] = k }
         if let k = KeychainHelper.get(.composioAPIKey),   !k.isEmpty { env["COMPOSIO_API_KEY"]             = k }
         if let k = KeychainHelper.get(.huggingFaceToken), !k.isEmpty { env["HF_TOKEN"]                     = k }
+        // BYOK: pass Anthropic key if set in Keychain (overrides env default)
+        if let k = KeychainHelper.get(.anthropicAPIKey),  !k.isEmpty { env["ANTHROPIC_API_KEY"]            = k }
         proc.environment = env
 
         let stdout = Pipe()
@@ -115,13 +118,10 @@ actor ClaudeCodeRunner {
         var sessionId:   String?  = nil
         var totalCost:   Double   = 0
         var startTime:   Date     = Date()
-        var accumulated: Double   = 0      // running cost for budget check
-
-        // Read stdout line by line via AsyncBytes
-        proc.terminationHandler = nil   // handled below
+        var accumulated: Double   = 0
 
         do {
-            try proc.run()
+            try proc.run()          // [C7-fix] Propagate launch errors instead of try?
             startTime = Date()
         } catch {
             continuation.yield(.error("Failed to launch claude: \(error.localizedDescription)"))
@@ -129,8 +129,9 @@ actor ClaudeCodeRunner {
             return
         }
 
-        // Read stderr in background (for debug)
-        stderr.fileHandleForReading.readabilityHandler = { h in
+        // Read stderr asynchronously; clear handler after process exits. [C9-fix]
+        let stderrHandle = stderr.fileHandleForReading
+        stderrHandle.readabilityHandler = { h in
             let data = h.availableData
             if let line = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .newlines),
                !line.isEmpty {
@@ -138,60 +139,63 @@ actor ClaudeCodeRunner {
             }
         }
 
-        // Stream stdout lines
-        var buffer = Data()
-        let handle = stdout.fileHandleForReading
+        // Stream stdout lines.
+        // [A1-fix] Use a detached DispatchQueue block rather than actor-blocking withCheckedContinuation.
+        // The block does NOT hold the actor — it communicates back via continuation.yield (thread-safe).
+        // [A2-fix] Remove the redundant proc.waitUntilExit() after the drain; the loop already ensures exit.
+        // [A11-fix] Use readabilityHandler+semaphore pattern to avoid busy-poll spin.
+        var lineBuffer = Data()
+        let handle  = stdout.fileHandleForReading
+        let sem     = DispatchSemaphore(value: 0)
 
-        // Poll stdout synchronously in a detached task so we don't block the actor
+        handle.readabilityHandler = { h in
+            let chunk = h.availableData
+            if chunk.isEmpty {
+                // EOF — process has exited
+                sem.signal()
+                return
+            }
+            lineBuffer.append(chunk)
+        }
+
+        // Wait for EOF on a background thread (does not block the actor).
         await withCheckedContinuation { (waitCont: CheckedContinuation<Void, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
-                while true {
-                    let chunk = handle.availableData
-                    if chunk.isEmpty {
-                        // Process may have exited
-                        if !proc.isRunning { break }
-                        Thread.sleep(forTimeInterval: 0.05)
-                        continue
-                    }
-                    buffer.append(chunk)
-                    // Parse complete lines
-                    while let newlineIdx = buffer.firstIndex(of: UInt8(ascii: "\n")) {
-                        let lineData = buffer[buffer.startIndex...newlineIdx]
-                        buffer = buffer[buffer.index(after: newlineIdx)...]
-                        guard let line = String(data: lineData, encoding: .utf8)?
-                            .trimmingCharacters(in: .whitespacesAndNewlines),
-                              !line.isEmpty else { continue }
-
-                        let events = Self.parseLine(line)
-                        for event in events {
-                            // Budget check
-                            if case .usage(_, _, let cost) = event { accumulated += cost }
-                            continuation.yield(event)
-                            if accumulated > budgetUSD {
-                                continuation.yield(.error("Budget exceeded: $\(String(format: "%.4f", accumulated)) > $\(budgetUSD)"))
-                                proc.interrupt()
-                            }
-                            if case .sessionId(let sid) = event { sessionId = sid }
-                            if case .usage(_, _, let c)  = event { totalCost = max(totalCost, c) }
-                        }
-                    }
-                }
-                // Drain remaining buffer
-                let remaining = handle.readDataToEndOfFile()
-                buffer.append(remaining)
-                while let newlineIdx = buffer.firstIndex(of: UInt8(ascii: "\n")) {
-                    let lineData = buffer[buffer.startIndex...newlineIdx]
-                    buffer = buffer[buffer.index(after: newlineIdx)...]
-                    guard let line = String(data: lineData, encoding: .utf8)?
-                        .trimmingCharacters(in: .whitespacesAndNewlines),
-                          !line.isEmpty else { continue }
-                    for event in Self.parseLine(line) { continuation.yield(event) }
-                }
+                sem.wait()
                 waitCont.resume()
             }
         }
 
-        proc.waitUntilExit()
+        // Handler fired for the last time; clear it. [C9-fix]
+        handle.readabilityHandler       = nil
+        stderrHandle.readabilityHandler = nil
+
+        // Drain any final data
+        let remaining = handle.readDataToEndOfFile()
+        lineBuffer.append(remaining)
+
+        // Parse all buffered lines
+        while let newlineIdx = lineBuffer.firstIndex(of: UInt8(ascii: "\n")) {
+            let lineData = lineBuffer[lineBuffer.startIndex...newlineIdx]
+            lineBuffer   = lineBuffer[lineBuffer.index(after: newlineIdx)...]
+            guard let line = String(data: lineData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !line.isEmpty else { continue }
+
+            let events = Self.parseLine(line)
+            for event in events {
+                if case .usage(_, _, let cost) = event { accumulated += cost }
+                continuation.yield(event)
+                if accumulated > budgetUSD {
+                    continuation.yield(.error("Budget exceeded: $\(String(format: "%.4f", accumulated)) > $\(budgetUSD)"))
+                    proc.interrupt()
+                }
+                if case .sessionId(let sid) = event { sessionId = sid }
+                if case .usage(_, _, let c)  = event { totalCost = max(totalCost, c) }
+            }
+        }
+
+        // [A2-fix] The EOF signal guarantees proc is done; no second waitUntilExit needed.
         let duration = Date().timeIntervalSince(startTime)
 
         continuation.yield(.done(ClaudeEvent.RunResult(
@@ -214,7 +218,6 @@ actor ClaudeCodeRunner {
         switch type {
 
         case "assistant":
-            // { "type": "assistant", "message": { "content": [ ... ] } }
             guard let msg     = json["message"] as? [String: Any],
                   let content = msg["content"]  as? [[String: Any]] else { return [] }
             var events: [ClaudeEvent] = []
@@ -225,10 +228,12 @@ actor ClaudeCodeRunner {
                 } else if blockType == "tool_use",
                           let name  = block["name"]  as? String,
                           let input = block["input"] as? [String: Any] {
-                    events.append(.toolUse(name: name, input: input))
+                    // [A1-fix] Serialize input to JSON string so ClaudeEvent stays Sendable.
+                    let inputJSON = (try? JSONSerialization.data(withJSONObject: input))
+                        .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                    events.append(.toolUse(name: name, inputJSON: inputJSON))
                 }
             }
-            // Usage inside assistant message
             if let usage = msg["usage"] as? [String: Any] {
                 let input  = usage["input_tokens"]  as? Int ?? 0
                 let output = usage["output_tokens"] as? Int ?? 0
@@ -240,7 +245,6 @@ actor ClaudeCodeRunner {
             return events
 
         case "tool_result":
-            // { "type": "tool_result", "name": "...", "content": "...", "is_error": false }
             let name    = json["name"]     as? String ?? "unknown"
             let content: String
             if let s = json["content"] as? String { content = s }
@@ -251,17 +255,12 @@ actor ClaudeCodeRunner {
             return [.toolResult(name: name, output: content, isError: isError)]
 
         case "result":
-            // { "type": "result", "subtype": "success", "cost_usd": 0.04,
-            //   "session_id": "...", "duration_ms": 12000, "total_cost_usd": 0.04 }
             let cost      = (json["total_cost_usd"] as? Double)
                          ?? (json["cost_usd"]       as? Double) ?? 0
             let sid       = json["session_id"] as? String
-            let durationMs = json["duration_ms"] as? Double ?? 0
             var events: [ClaudeEvent] = []
             if let sid { events.append(.sessionId(sid)) }
             events.append(.usage(inputTokens: 0, outputTokens: 0, costUSD: cost))
-            // Emit a done-like marker via usage; actual done is sent after process exit
-            _ = durationMs
             return events
 
         case "system":

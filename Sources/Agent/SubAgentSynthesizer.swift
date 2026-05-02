@@ -200,6 +200,15 @@ tools: [\(toolsYAML)]\(modelLine)
                     if line.hasPrefix("name:") { name = line.dropFirst(5).trimmingCharacters(in: .whitespaces) }
                     if line.hasPrefix("description:") { description = line.dropFirst(12).trimmingCharacters(in: .whitespaces) }
                     if line.hasPrefix("model:") { model = line.dropFirst(6).trimmingCharacters(in: .whitespaces) }
+                    // [A10-fix] Parse tools array: tools: ["Read", "Edit", "Bash"]
+                    if line.hasPrefix("tools:") {
+                        let raw = line.dropFirst(6).trimmingCharacters(in: .whitespaces)
+                        let stripped = raw.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                        let parsed = stripped.components(separatedBy: ",")
+                            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"'")) }
+                            .filter { !$0.isEmpty }
+                        if !parsed.isEmpty { tools = parsed }
+                    }
                 } else if pastFrontmatter {
                     bodyLines.append(line)
                 }

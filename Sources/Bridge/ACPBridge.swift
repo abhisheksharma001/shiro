@@ -417,7 +417,7 @@ final class ACPBridge: BridgeRouter {
                         risk:          risk
                     )
                     switch decision {
-                    case .approved:
+                    case .approved, .rememberAllow:
                         await self.executeToolAndReply(callId: callId, sessionKey: sk, name: name, input: input)
                     case .denied, .rememberDeny:
                         let denialReason: String?

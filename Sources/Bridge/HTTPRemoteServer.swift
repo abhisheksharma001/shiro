@@ -98,13 +98,50 @@ final class HTTPRemoteServer: ObservableObject, RemoteReplySink {
 
     // MARK: - Connection handler
 
-    private func handleConnection(_ conn: NWConnection) async {
-        // Read the full request (up to 64KB)
-        let data = await withCheckedContinuation { (cont: CheckedContinuation<Data, Never>) in
-            conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, _ in
-                cont.resume(returning: data ?? Data())
+    // [A7-fix] Read the complete HTTP request by looping until we have headers + full body.
+    private func readFullRequest(_ conn: NWConnection) async -> Data {
+        return await withCheckedContinuation { (cont: CheckedContinuation<Data, Never>) in
+            var received = Data()
+
+            func readMore() {
+                conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { chunk, _, isComplete, error in
+                    if let chunk, !chunk.isEmpty { received.append(chunk) }
+
+                    // Check if we have a complete HTTP request (headers + body).
+                    if let headerEnd = received.range(of: Data("\r\n\r\n".utf8)) {
+                        // Parse Content-Length to decide if body is complete.
+                        let headersData = received[..<headerEnd.lowerBound]
+                        let headers = String(data: headersData, encoding: .utf8) ?? ""
+                        var contentLength = 0
+                        for line in headers.components(separatedBy: "\r\n") {
+                            let lower = line.lowercased()
+                            if lower.hasPrefix("content-length:"),
+                               let val = Int(lower.dropFirst("content-length:".count)
+                                .trimmingCharacters(in: .whitespaces)) {
+                                contentLength = val
+                            }
+                        }
+                        let bodyStart  = headerEnd.upperBound
+                        let bodyReceived = received.count - bodyStart
+                        if bodyReceived >= contentLength {
+                            cont.resume(returning: received)
+                            return
+                        }
+                    }
+
+                    if isComplete || error != nil {
+                        cont.resume(returning: received)
+                        return
+                    }
+                    readMore()
+                }
             }
+            readMore()
         }
+    }
+
+    private func handleConnection(_ conn: NWConnection) async {
+        let data = await readFullRequest(conn)
 
         guard let raw = String(data: data, encoding: .utf8) else {
             sendResponse(conn, status: 400, body: #"{"error":"Invalid UTF-8"}"#)
@@ -179,12 +216,12 @@ final class HTTPRemoteServer: ObservableObject, RemoteReplySink {
             queueDepth -= 1
             asyncStatus[requestId] = "done"
             asyncResults[requestId] = accumulated
-            let escaped = accumulated
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "\\\"")
-                .replacingOccurrences(of: "\n", with: "\\n")
-            sendResponse(conn, status: 200,
-                         body: #"{"id":"\#(requestId)","status":"done","text":"\#(escaped)"}"#)
+            // [C4-fix] Use JSONSerialization — manual escaping misses \r, \t, control chars.
+            let responseObj: [String: Any] = ["id": requestId, "status": "done", "text": accumulated]
+            let responseBody = (try? JSONSerialization.data(withJSONObject: responseObj))
+                .flatMap { String(data: $0, encoding: .utf8) }
+                ?? #"{"id":"\#(requestId)","status":"done","text":"(encoding error)"}"#
+            sendResponse(conn, status: 200, body: responseBody)
         } else {
             // Return immediately; result polled via /v1/status?id=<id>
             sendResponse(conn, status: 202,

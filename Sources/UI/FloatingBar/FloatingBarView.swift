@@ -74,9 +74,11 @@ enum ShiroFont {
 
 struct FloatingBarView: View {
     @EnvironmentObject var appState: AppState
-    @State private var inputText:      String = ""
-    @State private var currentSendId:  UUID?  = nil
-    @State private var showPalette:    Bool   = false
+    @State private var inputText:        String = ""
+    @State private var currentSendId:    UUID?  = nil
+    @State private var showPalette:      Bool   = false
+    // [B10-fix] Store the event monitor so we can remove it on disappear.
+    @State private var keyMonitor:       Any?   = nil
     @FocusState private var inputFocused: Bool
 
     // Computed alias into shared conversation
@@ -224,7 +226,9 @@ struct FloatingBarView: View {
         .padding(.horizontal, 14)
         .frame(height: 60)
         .onAppear {
-            NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // [B10-fix] Guard against adding multiple monitors on repeated onAppear calls.
+            guard keyMonitor == nil else { return }
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "k" {
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
                         showPalette.toggle()
@@ -232,6 +236,13 @@ struct FloatingBarView: View {
                     return nil
                 }
                 return event
+            }
+        }
+        .onDisappear {
+            // [B10-fix] Remove the monitor to avoid accumulating listeners.
+            if let monitor = keyMonitor {
+                NSEvent.removeMonitor(monitor)
+                keyMonitor = nil
             }
         }
     }
@@ -412,8 +423,13 @@ struct FloatingBarView: View {
         inputText = ""
 
         // ── /code <task> — hand off to CodingOrchestrator ─────────────────
-        if text.lowercased().hasPrefix("/code") {
-            let task = String(text.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+        // [C12-fix] Require a space after /code to prevent "/codeReview" matching.
+        // Use case-insensitive prefix on a space-split rather than raw dropFirst(5).
+        let lc = text.lowercased()
+        if lc == "/code" || lc.hasPrefix("/code ") {
+            let task = lc == "/code"
+                ? ""
+                : String(text.dropFirst(6)).trimmingCharacters(in: .whitespaces)
             if task.isEmpty {
                 appState.conversationMessages.append(
                     DisplayMessage(role: .system, content: "Usage: /code <task description>"))

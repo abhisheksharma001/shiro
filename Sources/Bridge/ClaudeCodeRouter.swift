@@ -26,6 +26,9 @@ final class ClaudeCodeRouter: BridgeRouter {
     private(set) var isRunning: Bool = false
     var routeLabel: String { "Claude Code CLI (subscription)" }
 
+    // [B2/B3-fix] Accept skillsRegistry reference so the router can surface skill prompts.
+    var skillsRegistry: SkillsRegistry?
+
     // MARK: - Internals
 
     private var process: Process?

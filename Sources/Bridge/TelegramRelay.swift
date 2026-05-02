@@ -44,6 +44,10 @@ final class TelegramRelay {
     private var pollTask: Task<Void, Never>?
     /// Active streaming task — cancelled on /cancel.
     private var activeStreamTask: Task<Void, Never>?
+    // [B5-fix] Per-message accumulators for streamChunk live streaming (RemoteInbox path).
+    // Stored in class body — Swift extensions cannot hold stored properties.
+    var chunkAccumulators:  [String: String] = [:]
+    var lastChunkEditDates: [String: Date]   = [:]
     /// Instance-owned URLSession for all Telegram HTTP calls.
     private let wsSession: URLSession = {
         let c = URLSessionConfiguration.default
@@ -471,11 +475,7 @@ Send me anything and I'll run it through the agent.
                     "parse_mode":   "Markdown",
                     "reply_markup": keyboard
                 ])
-                if let msgId = (resp?["result"] as? [String: Any])?["message_id"] as? Int {
-                    pendingMultiPlans[String((resp?["result"] as? [String: Any])?["message_id"] as? Int ?? 0)] = multiPlan
-                    _ = msgId
-                }
-                // Store by a key we can recover from the callback
+                // [A6-fix] Remove the duplicate/dead msgId-keyed write. Store under "latest" only.
                 pendingMultiPlans["latest"] = multiPlan
             } catch {
                 await notify("❌ Multi-plan failed: \(error.localizedDescription)")
@@ -645,15 +645,17 @@ Send me anything and I'll run it through the agent.
             }
         }
 
-        await activeStreamTask?.value
-        activeStreamTask = nil
+        // [B11-fix] Do NOT await activeStreamTask on @MainActor — it would block the poll loop
+        // (preventing /cancel, approval callbacks, etc.) for the entire response duration.
+        // The task cleans itself up when the stream ends.
     }
 
     // MARK: - HTTP
 
     private func telegramURL(_ method: String) -> URL? {
-        let encoded = token.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? token
-        return URL(string: "https://api.telegram.org/bot\(encoded)/\(method)")
+        // [C5-fix] Telegram tokens are [0-9]+:[A-Za-z0-9_-]+ — no percent-encoding needed.
+        // Encoding was both unnecessary and potentially mangling colons on some platforms.
+        return URL(string: "https://api.telegram.org/bot\(token)/\(method)")
     }
 
     private func apiCall(method: String, params: [String: Any]) async throws -> [String: Any] {
@@ -692,22 +694,37 @@ Send me anything and I'll run it through the agent.
 
 extension TelegramRelay: RemoteReplySink {
 
+    // [B5-fix] streamChunk now does live editing for the RemoteInbox path.
     func streamChunk(_ text: String, replyToken: String?) async {
-        // replyToken is the message_id as a String when sent from RemoteInbox path.
-        // Chunk delivery handled by handleIncomingText's own streaming loop in direct path.
-        // For RemoteInbox path, we accumulate and edit in streamFinished.
-        // Lightweight no-op here; heavy lifting done in streamFinished.
-        _ = replyToken  // suppress unused warning — used in streamFinished
+        guard let token = replyToken, let msgId = Int(token) else { return }
+        chunkAccumulators[token, default: ""] += text
+        let now        = Date()
+        let lastEdit   = lastChunkEditDates[token] ?? Date.distantPast
+        let accumulated = chunkAccumulators[token]!
+        // Rate-limit edits: no more than once per 500ms (Telegram limit is ~1/s per chat).
+        guard now.timeIntervalSince(lastEdit) >= 0.5 else { return }
+        lastChunkEditDates[token] = now
+        let display = accumulated.count > 4000 ? "…" + String(accumulated.suffix(3900)) : accumulated
+        _ = try? await apiCall(method: "editMessageText", params: [
+            "chat_id":    chatId,
+            "message_id": msgId,
+            "text":       display,
+            "parse_mode": "Markdown"
+        ])
     }
 
     func streamFinished(replyToken: String?, finalText: String) async {
+        // Clean up streaming state for this token.
+        if let token = replyToken {
+            chunkAccumulators.removeValue(forKey: token)
+            lastChunkEditDates.removeValue(forKey: token)
+        }
         guard let token = replyToken, let msgId = Int(token) else {
-            // No existing message — send fresh.
             await notify(finalText.isEmpty ? "_(no response)_" : finalText)
             return
         }
         let text = finalText.count > 4000
-            ? "..." + String(finalText.suffix(3900))
+            ? "…" + String(finalText.suffix(3900))
             : finalText
         _ = try? await apiCall(method: "editMessageText", params: [
             "chat_id":    chatId,

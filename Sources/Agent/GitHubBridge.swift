@@ -59,11 +59,17 @@ actor GitHubBridge {
 
     /// Clones `slug` (e.g. "owner/repo") to `dest` URL.
     func clone(slug: String, to dest: URL) async throws {
-        // Remove existing dest if it's empty/broken
-        if FileManager.default.fileExists(atPath: dest.path) {
-            // Already cloned — skip
-            print("[GitHubBridge] \(dest.path) already exists, skipping clone")
+        // [C6-fix] Only skip if the clone is valid (has a .git directory).
+        // A partial/interrupted clone leaves the dest directory without .git, which
+        // must be re-cloned. The old check on dest.path alone would silently skip it.
+        let gitDir = dest.appendingPathComponent(".git").path
+        if FileManager.default.fileExists(atPath: gitDir) {
+            print("[GitHubBridge] \(dest.path) already has .git — skipping clone")
             return
+        }
+        // Remove broken partial clone if present.
+        if FileManager.default.fileExists(atPath: dest.path) {
+            try? FileManager.default.removeItem(at: dest)
         }
         let (_, err, code) = shell("gh", args: ["repo", "clone", slug, dest.path])
         if code != 0 { throw GitHubError.commandFailed("gh repo clone: \(err)") }

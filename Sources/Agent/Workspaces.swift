@@ -147,13 +147,12 @@ final class WorkspacesRegistry: ObservableObject {
             }
         }
 
-        // Merge: keep existing entries, add new ones, remove stale ones.
-        let existing = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.path.path, $0) })
+        // Merge: update lastSeenAt to now for all (re-)scanned workspaces.
+        // [B8-fix] Previous code preserved the old timestamp, freezing it at first-scan time.
+        // lastSeenAt should reflect when the workspace was last confirmed present.
         workspaces = found.map { ws in
             var updated = ws
-            if let prev = existing[ws.path.path] {
-                updated.lastSeenAt = prev.lastSeenAt   // preserve timestamp
-            }
+            updated.lastSeenAt = Date()   // always refresh to current scan time
             return updated
         }
 
@@ -217,8 +216,12 @@ final class WorkspacesRegistry: ObservableObject {
         let gh = GitHubBridge()
         try await gh.clone(slug: slug, to: dest)
         await scan()    // refresh registry
-        return resolve(hint: repoName)
-            ?? Workspace(name: repoName, path: dest, isGitRepo: true,
+        if let found = resolve(hint: repoName) { return found }
+        // [A9-fix] Verify .git directory before constructing fallback — a partial clone
+        // can leave the dest directory without a valid repo.
+        let gitPath = dest.appendingPathComponent(".git").path
+        let isValid = FileManager.default.fileExists(atPath: gitPath)
+        return Workspace(name: repoName, path: dest, isGitRepo: isValid,
                          lastSeenAt: Date(), remoteOriginUrl: "https://github.com/\(slug)")
     }
 

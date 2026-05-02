@@ -100,23 +100,24 @@ final class CostLedger: ObservableObject {
     }
 
     private func refreshAggregates() async {
-        // Today
-        let todayStr = ISO8601DateFormatter().string(from: Calendar.current.startOfDay(for: Date()))
+        // [A5-fix] Pass Date values directly to GRDB — it serialises them as ISO8601 UTC
+        // internally, matching what it stores for `created_at` columns. This is more reliable
+        // than manually constructing ISO8601 strings which can have timezone mismatches.
+        let todayStart = Calendar.current.startOfDay(for: Date())
         todaySpend = (try? await db.pool.read { conn in
             try Double.fetchOne(conn, sql:
                 "SELECT COALESCE(SUM(cost_usd),0) FROM cost_records WHERE created_at >= ?",
-                arguments: [todayStr])
+                arguments: [todayStart])
         }) ?? 0
 
         // This month
-        var cal = Calendar.current
+        let cal   = Calendar.current
         let comps = cal.dateComponents([.year, .month], from: Date())
         if let monthStart = cal.date(from: comps) {
-            let monthStr = ISO8601DateFormatter().string(from: monthStart)
             monthSpend = (try? await db.pool.read { conn in
                 try Double.fetchOne(conn, sql:
                     "SELECT COALESCE(SUM(cost_usd),0) FROM cost_records WHERE created_at >= ?",
-                    arguments: [monthStr])
+                    arguments: [monthStart])
             }) ?? 0
         }
     }
