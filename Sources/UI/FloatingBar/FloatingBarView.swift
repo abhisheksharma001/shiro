@@ -1,294 +1,419 @@
 /*
- AESTHETIC: Dark Terminal / Minimal Agency
- ─────────────────────────────────────────
- Background: #0D0D0D (near-black, not pure black)
- Accent:     #00FF85 (electric green — signals alive, active)
- Muted:      #3A3A3A (borders, inactive states)
- Text:       #E8E8E8 (warm white, easy on eyes)
- Error:      #FF4545 (red, sparing)
+ AESTHETIC: Claude — Editorial Warmth
+ ────────────────────────────────────
+ A direct homage to the visual identity of Anthropic's Claude apps:
+ warm charcoals (not cold blues), Claude's signature copper accent,
+ cream text, and an editorial typographic voice (serif for display
+ moments, SF Pro for prose, JetBrains Mono only for code/IDs).
 
- Font:       JetBrains Mono for input + status (identity)
-             SF Pro Display for labels + hints
+ BG:        #1A1916  (warm charcoal — Claude chat surface)
+ Sidebar:   #211E1B  (slightly raised warm)
+ Surface:   #25221E  (assistant bubble)
+ Elevated:  #2E2A26  (hover, focus)
+ Border:    #3A3530  (subtle warm hairline)
+ Accent:    #D97757  (CLAUDE COPPER — Anthropic's signature warm orange)
+ Active:    #B8946A  (warm gold — running / success)
+ Amber:     #D4A574  (thinking, warning)
+ Red:       #D86553  (error — warm-tinted)
+ Text:      #F2EDE5  (warm cream, not cold white)
+ Muted:     #8B847C  (warm gray)
+ DimMuted:  #5C544C  (placeholder text)
 
- Layout:     Compact 60pt pill at top of screen
-             Expands vertically when conversation is active
-             Status dot pulses green when listening/thinking
+ Type:      "New York" / Charter (system serif) — display headings, wordmark
+            SF Pro Text — body, UI labels
+            JetBrains Mono — code, route labels, technical badges only
 
- Signature:  Typing indicator: three green dots that bounce
-             Status dot has a radial pulse ring when active
+ Layout:    Generous whitespace, light hairlines, soft 12-14pt corners.
+            Asymmetry: input bar weighted left; tools/agents right.
 */
 
 import SwiftUI
 import MarkdownUI
 
+// MARK: - Palette  (Claude — Editorial Warmth)
+
+extension Color {
+    // — Backgrounds —
+    static let vBg       = Color(hex: "#1A1916")   // warm charcoal
+    static let vSidebar  = Color(hex: "#211E1B")
+    static let vSurface  = Color(hex: "#25221E")
+    static let vElev     = Color(hex: "#2E2A26")
+    // — Lines —
+    static let vBorder   = Color(hex: "#3A3530")
+    static let vBorderHi = Color(hex: "#4A433D")
+    // — Accents —
+    static let vAccent   = Color(hex: "#D97757")   // Claude copper
+    static let vAccent2  = Color(hex: "#C8845F")   // hover/pressed
+    static let vActive   = Color(hex: "#B8946A")   // warm gold (running)
+    static let vAmber    = Color(hex: "#D4A574")
+    static let vRed      = Color(hex: "#D86553")
+    // — Text —
+    static let vText     = Color(hex: "#F2EDE5")   // warm cream
+    static let vMuted    = Color(hex: "#8B847C")
+    static let vDim      = Color(hex: "#5C544C")
+}
+
+// MARK: - Type system
+
+enum ShiroFont {
+    /// Editorial serif (system "New York" on macOS) — for wordmarks + display headings.
+    static func serif(size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight, design: .serif)
+    }
+    /// SF Pro Text — body, prose, UI labels.
+    static func ui(size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight)
+    }
+    /// JetBrains Mono — code, route labels, technical badges, IDs.
+    static func mono(size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        .custom("JetBrains Mono", size: size).weight(weight)
+    }
+}
+
+// MARK: - FloatingBarView
+
 struct FloatingBarView: View {
     @EnvironmentObject var appState: AppState
-    @State private var inputText: String = ""
-    @State private var isExpanded: Bool = false
-    @State private var messages: [DisplayMessage] = []
-    @State private var isTyping: Bool = false
-    /// Tracks the most recent send-request — stale streaming callbacks check
-    /// this so concurrent sends can't interleave tokens into the wrong bubble.
-    @State private var currentSendId: UUID? = nil
+    @State private var inputText:        String = ""
+    @State private var currentSendId:    UUID?  = nil
+    @State private var showPalette:      Bool   = false
+    // [B10-fix] Store the event monitor so we can remove it on disappear.
+    @State private var keyMonitor:       Any?   = nil
     @FocusState private var inputFocused: Bool
 
-    // Colors
-    private let bg = Color(hex: "#0D0D0D")
-    private let accent = Color(hex: "#00FF85")
-    private let muted = Color(hex: "#3A3A3A")
-    private let textColor = Color(hex: "#E8E8E8")
+    // Computed alias into shared conversation
+    private var messages: [DisplayMessage] { appState.conversationMessages }
+
+    /// Single source of truth — drives both this view AND the NSPanel frame
+    /// (FloatingBarWindowController observes the same property via Combine).
+    private var isExpanded: Bool {
+        get { appState.isFloatingExpanded }
+    }
 
     var body: some View {
         VStack(spacing: 8) {
-            // ── Approval cards (above the bar) ─────────────────────
-            if let gate = appState.consentGate, !gate.pendingApprovals.isEmpty {
-                ApprovalQueueOverlay(gate: gate)
+            // ⌘K command palette overlay
+            if showPalette {
+                CommandPaletteView(appState: appState, isShown: $showPalette) { selected in
+                    inputText = selected
+                    showPalette = false
+                    inputFocused = true
+                }
+                .transition(.asymmetric(
+                    insertion: .move(edge: .top).combined(with: .opacity),
+                    removal:   .scale(scale: 0.96).combined(with: .opacity)
+                ))
             }
 
-            // ── Main floating bar ───────────────────────────────────
+            // Veto toasts for medium-risk auto-approved actions
+            if let gate = appState.consentGate, !gate.activeVetoToasts.isEmpty {
+                VetoToastQueue(gate: gate)
+            }
+
+            // Approval overlays float above the bar
+            // Pass stt so voice keywords ("approve"/"deny"/"always"/"never") resolve cards
+            if let gate = appState.consentGate, !gate.pendingApprovals.isEmpty {
+                ApprovalQueueOverlay(gate: gate, stt: appState.stt)
+            }
+
             ZStack {
-                RoundedRectangle(cornerRadius: isExpanded ? 16 : 30)
-                    .fill(bg)
+                RoundedRectangle(cornerRadius: isExpanded ? 18 : 32)
+                    .fill(Color.vBg)
                     .overlay(
-                        RoundedRectangle(cornerRadius: isExpanded ? 16 : 30)
-                            .strokeBorder(muted, lineWidth: 1)
+                        RoundedRectangle(cornerRadius: isExpanded ? 18 : 32)
+                            .strokeBorder(Color.vBorder, lineWidth: 1)
                     )
-                    .shadow(color: .black.opacity(0.6), radius: 20, y: 4)
+                    .shadow(color: .black.opacity(0.7), radius: 24, y: 6)
 
                 VStack(spacing: 0) {
-                    // ── Main Bar ─────────────────────────────────────
-                    mainBar
+                    compactBar
 
-                    // ── Meeting Mode ──────────────────────────────────
                     if appState.isMeetingMode {
-                        Divider().background(muted).padding(.horizontal, 16)
-                        MeetingModeView { _ in
-                            withAnimation { isExpanded = false }
-                        }
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .top).combined(with: .opacity),
-                            removal:   .move(edge: .top).combined(with: .opacity)
-                        ))
-                    }
-                    // ── Expanded Chat Area ────────────────────────────
-                    else if isExpanded {
-                        Divider().background(muted).padding(.horizontal, 16)
-                        chatArea
-                            .transition(.asymmetric(
-                                insertion: .move(edge: .top).combined(with: .opacity),
-                                removal:   .move(edge: .top).combined(with: .opacity)
-                            ))
+                        divider
+                        MeetingModeView { _ in collapse() }
+                    } else if isExpanded {
+                        divider
+                        chatPanel
                     }
                 }
             }
-            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isExpanded)
         }
-        .onAppear { checkLMStudio() }
+        .padding(.horizontal, 0)
+        .onAppear { checkConnectivity() }
     }
 
-    // MARK: - Main Bar
+    // MARK: - Compact Bar (always visible, 60pt)
 
-    private var mainBar: some View {
-        HStack(spacing: 12) {
-            // Status indicator
-            statusDot
+    private var compactBar: some View {
+        HStack(spacing: 10) {
+            // State orb
+            stateOrb
 
-            // Input
+            // Route label pill
+            routePill
+
+            // Quick input
             ZStack(alignment: .leading) {
                 if inputText.isEmpty {
-                    Text(placeholderText)
-                        .font(.custom("JetBrains Mono", size: 13))
-                        .foregroundColor(Color(hex: "#5A5A5A"))
+                    Text(placeholder)
+                        .font(.custom("JetBrains Mono", size: 12.5))
+                        .foregroundColor(.vMuted)
                 }
                 TextField("", text: $inputText)
-                    .font(.custom("JetBrains Mono", size: 13))
-                    .foregroundColor(textColor)
+                    .font(.custom("JetBrains Mono", size: 12.5))
+                    .foregroundColor(.vText)
                     .textFieldStyle(.plain)
                     .focused($inputFocused)
                     .onSubmit { sendMessage() }
                     .onChange(of: inputFocused) { _, focused in
-                        withAnimation { isExpanded = focused || !messages.isEmpty }
+                        let want = focused || !messages.isEmpty
+                        if appState.isFloatingExpanded != want {
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                                appState.isFloatingExpanded = want
+                            }
+                        }
                     }
             }
 
-            // Right controls
-            HStack(spacing: 8) {
-                // Meeting mode toggle
-                meetingButton
+            HStack(spacing: 6) {
+                // Sub-agent badge
+                if !appState.subAgentSessions.isEmpty {
+                    subAgentBadge
+                }
 
-                // Mic button (only in normal mode)
+                // Meeting toggle
+                barButton(
+                    icon: appState.isMeetingMode ? "waveform.circle.fill" : "waveform.circle",
+                    color: appState.isMeetingMode ? .vAmber : .vMuted
+                ) {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                        appState.isMeetingMode.toggle()
+                        if appState.isMeetingMode { appState.isFloatingExpanded = true }
+                    }
+                }
+                .help(appState.isMeetingMode ? "Exit meeting mode" : "Meeting mode")
+
+                // Mic
                 if !appState.isMeetingMode {
-                    micButton
+                    barButton(
+                        icon: appState.isListening ? "mic.fill" : "mic",
+                        color: appState.isListening ? .vActive : .vMuted
+                    ) { appState.toggleListening() }
+                    .help(appState.isListening ? "Stop mic" : "Push to talk")
                 }
 
                 // Send / Stop
                 if appState.isProcessing {
-                    stopButton
+                    barButton(icon: "stop.circle.fill", color: .vRed) { stopProcessing() }
+                        .help("Stop")
                 } else if !inputText.isEmpty {
-                    sendButton
+                    barButton(icon: "arrow.up.circle.fill", color: .vAccent) { sendMessage() }
+                        .help("Send")
                 }
+
+                // Clear chat
+                if !messages.isEmpty && !appState.isProcessing {
+                    barButton(icon: "trash", color: .vMuted) { appState.clearConversation() }
+                        .help("Clear conversation")
+                }
+
+                // Expand to main window
+                barButton(icon: "arrow.up.left.and.arrow.down.right", color: .vMuted) {
+                    ShiroMainWindowController.shared.show()
+                }
+                .help("Open full Shiro workspace")
             }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 14)
         .frame(height: 60)
-    }
-
-    // MARK: - Status Dot
-
-    private var statusDot: some View {
-        ZStack {
-            Circle()
-                .fill(statusColor.opacity(0.2))
-                .frame(width: 24, height: 24)
-                .scaleEffect(appState.isProcessing ? 1.4 : 1.0)
-                .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true),
-                           value: appState.isProcessing)
-
-            Circle()
-                .fill(statusColor)
-                .frame(width: 10, height: 10)
-        }
-        .frame(width: 24, height: 24)
-        .help(appState.agentStatus.label)
-    }
-
-    private var statusColor: Color {
-        switch appState.agentStatus {
-        case .idle: return Color(hex: "#3A3A3A")
-        case .listening: return accent
-        case .thinking: return Color(hex: "#7B7BFF")
-        case .acting: return Color(hex: "#FFB800")
-        case .speaking: return accent
-        case .error: return Color(hex: "#FF4545")
-        }
-    }
-
-    // MARK: - Mic Button
-
-    private var micButton: some View {
-        Button {
-            toggleListening()
-        } label: {
-            Image(systemName: appState.isListening ? "mic.fill" : "mic")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundColor(appState.isListening ? accent : Color(hex: "#5A5A5A"))
-                .frame(width: 28, height: 28)
-                .background(
-                    Circle().fill(appState.isListening ? accent.opacity(0.15) : Color.clear)
-                )
-        }
-        .buttonStyle(.plain)
-        .help(appState.isListening ? "Stop listening" : "Push to talk")
-    }
-
-    private var meetingButton: some View {
-        Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                appState.isMeetingMode.toggle()
-                if appState.isMeetingMode { isExpanded = true }
+        .onAppear {
+            // [B10-fix] Guard against adding multiple monitors on repeated onAppear calls.
+            guard keyMonitor == nil else { return }
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "k" {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                        showPalette.toggle()
+                    }
+                    return nil
+                }
+                return event
             }
-        } label: {
-            Image(systemName: appState.isMeetingMode ? "waveform.circle.fill" : "waveform.circle")
-                .font(.system(size: 16, weight: .medium))
-                .foregroundColor(appState.isMeetingMode ? Color(hex: "#FFB800") : Color(hex: "#5A5A5A"))
-                .frame(width: 28, height: 28)
-                .background(
-                    Circle().fill(appState.isMeetingMode ? Color(hex: "#FFB800").opacity(0.15) : Color.clear)
-                )
         }
-        .buttonStyle(.plain)
-        .help(appState.isMeetingMode ? "Exit meeting mode" : "Start meeting mode")
+        .onDisappear {
+            // [B10-fix] Remove the monitor to avoid accumulating listeners.
+            if let monitor = keyMonitor {
+                NSEvent.removeMonitor(monitor)
+                keyMonitor = nil
+            }
+        }
     }
 
-    private var sendButton: some View {
-        Button { sendMessage() } label: {
-            Image(systemName: "arrow.up.circle.fill")
-                .font(.system(size: 22))
-                .foregroundColor(accent)
-        }
-        .buttonStyle(.plain)
-        .keyboardShortcut(.return, modifiers: [])
-    }
+    // MARK: - Chat Panel (expanded, scrollable)
 
-    private var stopButton: some View {
-        Button {
-            appState.acpBridge?.interrupt(sessionKey: "main")
-            appState.agentCoordinator?.bridge?.interrupt(sessionKey: "main")
-            appState.isProcessing = false
-            appState.agentStatus = .idle
-            isTyping = false
-        } label: {
-            Image(systemName: "stop.circle.fill")
-                .font(.system(size: 22))
-                .foregroundColor(Color(hex: "#FF4545"))
-        }
-        .buttonStyle(.plain)
-    }
-
-    // MARK: - Chat Area
-
-    private var chatArea: some View {
+    private var chatPanel: some View {
+        // FIXED height — never let SwiftUI grow the panel based on content,
+        // because the NSPanel auto-resizes against this and we get an
+        // NSISEngine constraint feedback loop → stack-overflow crash.
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 10) {
                         ForEach(messages) { msg in
-                            MessageBubble(message: msg, accent: accent, textColor: textColor)
+                            MessageBubble(message: msg)
                                 .id(msg.id)
                         }
-                        if isTyping {
-                            typingIndicator
+                        if appState.isTypingMain {
+                            TypingDots()
+                                .padding(.leading, 16)
+                                .id("typing-indicator")
                         }
                     }
-                    .padding(16)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
                 }
-                .frame(maxHeight: 400)
+                .frame(height: 440)               // fixed, NOT maxHeight
                 .onChange(of: messages.count) { _, _ in
                     withAnimation { proxy.scrollTo(messages.last?.id) }
                 }
-                .onChange(of: isTyping) { _, _ in
-                    if isTyping { proxy.scrollTo("typing") }
+                .onChange(of: appState.isTypingMain) { _, v in
+                    if v { withAnimation { proxy.scrollTo("typing-indicator") } }
                 }
             }
 
-            // Status line
+            // Status line when processing
             if appState.isProcessing {
                 HStack(spacing: 6) {
+                    Image(systemName: "circle.fill")
+                        .font(.system(size: 5))
+                        .foregroundColor(.vAmber)
                     Text(appState.agentStatus.label)
-                        .font(.custom("JetBrains Mono", size: 11))
-                        .foregroundColor(Color(hex: "#5A5A5A"))
+                        .font(.custom("JetBrains Mono", size: 10.5))
+                        .foregroundColor(.vMuted)
                     Spacer()
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 8)
+                .frame(height: 22)
+            } else {
+                Spacer().frame(height: 8)
             }
         }
+        .frame(height: 472)                       // total = 440 + 32 footer
     }
 
-    private var typingIndicator: some View {
-        HStack(spacing: 4) {
-            ForEach(0..<3) { i in
+    // MARK: - State Orb
+
+    private var stateOrb: some View {
+        ZStack {
+            if appState.isProcessing {
                 Circle()
-                    .fill(accent)
-                    .frame(width: 5, height: 5)
-                    .scaleEffect(isTyping ? 1.2 : 0.8)
-                    .animation(
-                        .easeInOut(duration: 0.4)
-                            .repeatForever(autoreverses: true)
-                            .delay(Double(i) * 0.12),
-                        value: isTyping
-                    )
+                    .fill(orbColor.opacity(0.18))
+                    .frame(width: 26, height: 26)
+                    .scaleEffect(1.3)
+                    .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true),
+                               value: appState.isProcessing)
             }
+            Circle()
+                .fill(orbColor)
+                .frame(width: 10, height: 10)
         }
-        .padding(.vertical, 8)
-        .id("typing")
+        .frame(width: 26, height: 26)
+        .help(appState.agentStatus.label)
     }
 
-    // MARK: - Placeholder
+    private var orbColor: Color {
+        switch appState.agentStatus {
+        case .idle:      return .vMuted
+        case .listening: return .vActive
+        case .thinking:  return .vAccent
+        case .acting:    return .vAmber
+        case .speaking:  return .vActive
+        case .error:     return .vRed
+        }
+    }
 
-    private var placeholderText: String {
-        if !appState.lmStudioConnected { return "⚠ LM Studio not connected" }
-        return "Ask Shiro anything… (⌘.)"
+    // MARK: - Route Pill
+
+    private var routePill: some View {
+        Text(routeShortLabel)
+            .font(.custom("JetBrains Mono", size: 9.5))
+            .foregroundColor(routePillColor)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(routePillColor.opacity(0.12))
+            .overlay(
+                Capsule().strokeBorder(routePillColor.opacity(0.35), lineWidth: 0.8)
+            )
+            .clipShape(Capsule())
+    }
+
+    private var routeShortLabel: String {
+        switch appState.activeRouteMode {
+        case .claudeCode: return "claude-cli"
+        case .anthropic:  return "api"
+        case .lmStudio:   return "local"
+        }
+    }
+
+    private var routePillColor: Color {
+        switch appState.bridgeStatus {
+        case .running:           return .vActive
+        case .starting:          return .vAmber
+        case .restarting:        return .vAmber
+        case .failingOver:       return .vAmber
+        case .offline:           return .vRed
+        }
+    }
+
+    // MARK: - Sub-agent Badge
+
+    private var subAgentBadge: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "cpu")
+                .font(.system(size: 9, weight: .semibold))
+            Text("\(appState.subAgentSessions.count)")
+                .font(.custom("JetBrains Mono", size: 9.5))
+        }
+        .foregroundColor(.vAccent)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(Color.vAccent.opacity(0.12))
+        .clipShape(Capsule())
+        .help("\(appState.subAgentSessions.count) sub-agent(s) running")
+    }
+
+    // MARK: - Helpers
+
+    private var placeholder: String {
+        // Surface bridge problems immediately rather than showing a generic prompt.
+        switch appState.bridgeStatus {
+        case .offline(let reason): return "⚠  bridge offline — \(reason)"
+        case .restarting:           return "↻ restarting bridge…"
+        case .failingOver:          return "↻ failing over backend…"
+        case .starting:             return "starting bridge…"
+        case .running:              break
+        }
+        switch appState.activeRouteMode {
+        case .claudeCode: return "Ask Shiro · via Claude CLI · type /  to use a skill"
+        case .anthropic:  return "Ask Shiro · via Anthropic API · /forecast /research /ingest …"
+        case .lmStudio:
+            return appState.lmStudioConnected
+                ? "Ask Shiro · local LM Studio · /forecast /research …"
+                : "⚠  LM Studio not connected — open Settings → Route"
+        }
+    }
+
+    private var divider: some View {
+        Rectangle()
+            .fill(Color.vBorder)
+            .frame(height: 1)
+            .padding(.horizontal, 12)
+    }
+
+    private func collapse() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            appState.isFloatingExpanded = false
+        }
     }
 
     // MARK: - Actions
@@ -298,103 +423,144 @@ struct FloatingBarView: View {
         guard !text.isEmpty, let coordinator = appState.agentCoordinator else { return }
         inputText = ""
 
-        // ── Slash command / skill routing ─────────────────────────────────
-        var queryText = text
+        // ── /code <task> — hand off to CodingOrchestrator ─────────────────
+        // [C12-fix] Require a space after /code to prevent "/codeReview" matching.
+        // Use case-insensitive prefix on a space-split rather than raw dropFirst(5).
+        let lc = text.lowercased()
+        if lc == "/code" || lc.hasPrefix("/code ") {
+            let task = lc == "/code"
+                ? ""
+                : String(text.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+            if task.isEmpty {
+                appState.conversationMessages.append(
+                    DisplayMessage(role: .system, content: "Usage: /code <task description>"))
+                return
+            }
+            appState.conversationMessages.append(
+                DisplayMessage(role: .user, content: text, badge: "[/code]"))
+            appState.conversationMessages.append(
+                DisplayMessage(role: .assistant, content: "⚙️ Planning coding task…"))
+            Task {
+                do {
+                    guard let orch = appState.codingOrchestrator else {
+                        throw CodingOrchestratorError.noWorkspace("Orchestrator not ready")
+                    }
+                    let plan = try await orch.plan(task: task)
+                    // Update assistant bubble with plan preview
+                    if appState.conversationMessages.last?.role == .assistant {
+                        let idx = appState.conversationMessages.indices.last!
+                        appState.conversationMessages[idx].content = """
+**Plan**
+Project: \(plan.workspaceName)
+Branch: `\(plan.branchName)`
+Mode: \(plan.mode.rawValue)
+Budget: $\(String(format: "%.2f", plan.maxCostUSD))
+
+\(plan.prompt)
+
+_Opening VS Code…_
+"""
+                    }
+                    try await orch.executePlan(plan)
+                    if appState.conversationMessages.last?.role == .assistant {
+                        let idx = appState.conversationMessages.indices.last!
+                        appState.conversationMessages[idx].content += "\n✅ VS Code opened. Claude Code will start automatically."
+                    }
+                } catch {
+                    appState.logError(source: "CodingOrchestrator", message: error.localizedDescription)
+                    if appState.conversationMessages.last?.role == .assistant {
+                        let idx = appState.conversationMessages.indices.last!
+                        appState.conversationMessages[idx].content = "❌ \(error.localizedDescription)"
+                    }
+                }
+            }
+            return
+        }
+
+        var queryText              = text
         var systemPromptOverride: String? = nil
 
         if text.hasPrefix("/"),
            let registry = appState.skillsRegistry,
            let resolved = registry.resolve(input: text) {
-            // Matched a skill: display the slash command as typed,
-            // but send the filled prompt with the skill's system prompt.
-            queryText = resolved.prompt
-            systemPromptOverride = resolved.skill.systemPrompt
-            // Show a badge so the user knows which skill ran
-            messages.append(DisplayMessage(
-                role: .user,
-                content: text,
-                badge: "[\(resolved.skill.name)]"
-            ))
+            queryText             = resolved.prompt
+            systemPromptOverride  = resolved.skill.systemPrompt
+            appState.conversationMessages.append(
+                DisplayMessage(role: .user, content: text, badge: "[\(resolved.skill.name)]")
+            )
         } else {
-            messages.append(DisplayMessage(role: .user, content: text))
+            appState.conversationMessages.append(DisplayMessage(role: .user, content: text))
         }
 
-        // ── Streaming assistant bubble ─────────────────────────────────────
-        messages.append(DisplayMessage(role: .assistant, content: ""))
-        isTyping = true
+        // Streaming assistant bubble (empty — fills via token callbacks)
+        appState.conversationMessages.append(DisplayMessage(role: .assistant, content: ""))
+        appState.isTypingMain = true
         appState.isProcessing = true
-        appState.agentStatus = .thinking
-
-        // Per-request id so a second send() won't capture tokens from the
-        // previous in-flight request.
-        let requestId = UUID()
-        currentSendId = requestId
-
-        // ── Set callbacks BEFORE send() — otherwise the bridge's first
-        //    text_delta can arrive before we subscribe and tokens are lost.
-        coordinator.onStreamingToken = { [self] token in
-            guard currentSendId == requestId else { return }
-            guard let last = messages.indices.last else { return }
-            let updated = DisplayMessage(role: .assistant,
-                                          content: messages[last].content + token)
-            messages[last] = updated
+        appState.agentStatus  = .thinking
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            appState.isFloatingExpanded = true
         }
-        coordinator.onTurnComplete = { [self] _ in
-            guard currentSendId == requestId else { return }
-            isTyping = false
-            appState.isProcessing = false
-            appState.agentStatus = .idle
-            coordinator.onStreamingToken = nil
-            coordinator.onTurnComplete = nil
+
+        let reqId = UUID()
+        currentSendId = reqId
+
+        coordinator.onStreamingToken = { [weak appState] token in
+            guard let appState else { return }
+            guard appState.conversationMessages.last?.role == .assistant else { return }
+            let idx = appState.conversationMessages.indices.last!
+            appState.conversationMessages[idx].content += token
+        }
+
+        coordinator.onTurnComplete = { [weak appState] _ in
+            Task { @MainActor in
+                appState?.isTypingMain = false
+                appState?.isProcessing = false
+                appState?.agentStatus  = .idle
+                coordinator.onStreamingToken = nil
+                coordinator.onTurnComplete   = nil
+                await appState?.refreshSubAgentSessions()
+            }
         }
 
         Task {
             do {
-                _ = try await coordinator.send(
-                    query: queryText,
-                    systemPrompt: systemPromptOverride
-                )
+                _ = try await coordinator.send(query: queryText, systemPrompt: systemPromptOverride)
             } catch {
-                await MainActor.run {
-                    isTyping = false
-                    if let last = messages.indices.last {
-                        messages[last] = DisplayMessage(role: .assistant,
-                                                         content: "❌ \(error.localizedDescription)")
-                    }
-                    appState.isProcessing = false
-                    appState.agentStatus = .error(error.localizedDescription)
+                appState.isTypingMain          = false
+                appState.isProcessing          = false
+                appState.agentStatus           = .error(error.localizedDescription)
+                appState.logError(source: "agent", message: error.localizedDescription)
+                if appState.conversationMessages.last?.role == .assistant {
+                    let idx = appState.conversationMessages.indices.last!
+                    appState.conversationMessages[idx].content = "❌ \(error.localizedDescription)"
                 }
             }
         }
     }
 
-    private func toggleListening() {
-        if appState.isListening {
-            appState.isListening = false
-            appState.agentStatus = .idle
-            // Stop STT
-            _ = appState.stt?.stopMeetingMode()
-        } else {
-            appState.isListening = true
-            appState.agentStatus = .listening
-            // Start STT → when segment arrives, send as message
-            appState.stt?.onSegment = { [weak appState] segment in
-                guard segment.isFinal else { return }
-                Task { @MainActor in
-                    // Auto-send transcribed speech as query
-                    // Small debounce: only send if silence follows
-                    appState?.currentTranscript = segment.text
-                }
-            }
-            appState.stt?.startMeetingMode()
-        }
+    private func stopProcessing() {
+        appState.agentCoordinator?.bridge?.interrupt(sessionKey: "main")
+        appState.acpBridge?.interrupt(sessionKey: "main")
+        appState.isProcessing  = false
+        appState.agentStatus   = .idle
+        appState.isTypingMain  = false
     }
 
-    private func checkLMStudio() {
+    private func checkConnectivity() {
         Task {
-            let connected = await appState.lmStudio?.healthCheck() ?? false
-            await MainActor.run { appState.lmStudioConnected = connected }
+            let ok = await appState.lmStudio?.healthCheck() ?? false
+            appState.lmStudioConnected = ok
         }
+    }
+
+    private func barButton(icon: String, color: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(color)
+                .frame(width: 28, height: 28)
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -402,64 +568,126 @@ struct FloatingBarView: View {
 
 struct MessageBubble: View {
     let message: DisplayMessage
-    let accent: Color
-    let textColor: Color
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             if message.role == .user {
-                Spacer(minLength: 60)
-                VStack(alignment: .trailing, spacing: 3) {
+                Spacer(minLength: 64)
+                VStack(alignment: .trailing, spacing: 4) {
                     Text(message.content)
-                        .font(.custom("JetBrains Mono", size: 12))
-                        .foregroundColor(Color(hex: "#0D0D0D"))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(accent)
-                        .cornerRadius(12)
-                        .cornerRadius(3, corners: .topRight)
+                        .font(ShiroFont.ui(size: 12.5))
+                        .foregroundColor(Color.vBg)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 9)
+                        .background(Color.vAccent)
+                        .clipShape(
+                            UnevenRoundedRectangle(
+                                topLeadingRadius: 14, bottomLeadingRadius: 14,
+                                bottomTrailingRadius: 14, topTrailingRadius: 4,
+                                style: .continuous
+                            )
+                        )
                     if let badge = message.badge {
                         Text(badge)
-                            .font(.custom("JetBrains Mono", size: 9))
-                            .foregroundColor(accent.opacity(0.7))
+                            .font(ShiroFont.mono(size: 9))
+                            .foregroundColor(.vAccent.opacity(0.75))
                     }
                 }
-            } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 4) {
-                        Circle().fill(Color(hex: "#7B7BFF")).frame(width: 6, height: 6)
-                        Text("shiro").font(.system(size: 9, weight: .bold)).foregroundColor(Color(hex: "#7B7BFF"))
+            } else if message.role == .assistant {
+                VStack(alignment: .leading, spacing: 6) {
+                    // Wordmark — serif "Shiro" in copper
+                    HStack(spacing: 5) {
+                        Circle().fill(Color.vAccent).frame(width: 5, height: 5)
+                        Text("Shiro")
+                            .font(ShiroFont.serif(size: 11, weight: .semibold))
+                            .foregroundColor(.vAccent)
                     }
-                    Markdown(message.content)
-                        .markdownTheme(.shiro(textColor: textColor))
-                        .font(.system(size: 12))
-                        .foregroundColor(textColor)
+
+                    if message.content.isEmpty {
+                        TypingDots()
+                    } else {
+                        Markdown(message.content)
+                            .markdownTheme(.shiroTheme)
+                            .font(ShiroFont.ui(size: 12.5))
+                            .foregroundColor(.vText)
+                    }
+
+                    // Tool calls inline
+                    if !message.toolCalls.isEmpty {
+                        ForEach(message.toolCalls) { call in
+                            ToolCallChip(call: call)
+                        }
+                    }
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color(hex: "#1A1A1A"))
-                .cornerRadius(12)
-                .cornerRadius(3, corners: .topLeft)
-                Spacer(minLength: 60)
+                .padding(.horizontal, 13)
+                .padding(.vertical, 10)
+                .background(Color.vSurface)
+                .clipShape(
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: 4, bottomLeadingRadius: 14,
+                        bottomTrailingRadius: 14, topTrailingRadius: 14,
+                        style: .continuous
+                    )
+                )
+                Spacer(minLength: 64)
             }
         }
     }
 }
 
-// MARK: - Supporting Types
+// MARK: - Tool Call Chip
 
-struct DisplayMessage: Identifiable {
-    let id = UUID()
-    let role: MessageRole
-    let content: String
-    let timestamp = Date()
-    /// Optional label shown below the bubble (e.g. "[research]" for skill invocations).
-    var badge: String? = nil
+struct ToolCallChip: View {
+    let call: ToolCallInfo
 
-    enum MessageRole { case user, assistant }
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: call.isRunning ? "arrow.triangle.2.circlepath" : (call.isError ? "xmark.circle" : "checkmark.circle"))
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(call.isRunning ? .vAmber : (call.isError ? .vRed : .vActive))
+                .rotationEffect(call.isRunning ? .degrees(360) : .degrees(0))
+                .animation(call.isRunning ? .linear(duration: 1).repeatForever(autoreverses: false) : .default,
+                           value: call.isRunning)
+
+            Text(call.name)
+                .font(.custom("JetBrains Mono", size: 10))
+                .foregroundColor(.vMuted)
+
+            if let output = call.output {
+                Text(output.prefix(60))
+                    .font(.custom("JetBrains Mono", size: 10))
+                    .foregroundColor(.vText.opacity(0.7))
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .background(Color.vBorder.opacity(0.6))
+        .cornerRadius(6)
+    }
 }
 
-// MARK: - Settings View
+// MARK: - Typing Dots
+
+struct TypingDots: View {
+    @State private var phase: Int = 0
+    private let timer = Timer.publish(every: 0.35, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<3) { i in
+                Circle()
+                    .fill(Color.vAccent.opacity(i == phase ? 1 : 0.3))
+                    .frame(width: 5, height: 5)
+                    .scaleEffect(i == phase ? 1.25 : 1.0)
+                    .animation(.easeInOut(duration: 0.2), value: phase)
+            }
+        }
+        .onReceive(timer) { _ in phase = (phase + 1) % 3 }
+    }
+}
+
+// MARK: - Settings View (launched from ShiroApp Settings scene)
 
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
@@ -479,21 +707,39 @@ struct SettingsView: View {
             MCPTab()
                 .tabItem { Label("MCP Servers", systemImage: "server.rack") }
                 .tag(3)
+            UIPrefsTab()
+                .tabItem { Label("Layout", systemImage: "rectangle.3.group") }
+                .tag(4)
+            ErrorLogTab()
+                .tabItem { Label("Error Log", systemImage: "exclamationmark.triangle.fill") }
+                .tag(5)
+            PoliciesTab()
+                .tabItem { Label("Policies", systemImage: "checkmark.shield.fill") }
+                .tag(6)
+            AuditTab()
+                .tabItem { Label("Audit", systemImage: "doc.text.magnifyingglass") }
+                .tag(7)
+            RemoteAccessTab()
+                .tabItem { Label("Remote", systemImage: "network") }
+                .tag(8)
+            BudgetTab()
+                .tabItem { Label("Budget", systemImage: "dollarsign.circle.fill") }
+                .tag(9)
         }
-        .frame(width: 560, height: 480)
+        .frame(width: 580, height: 600)
         .padding(8)
         .environmentObject(appState)
     }
 }
 
-// MARK: Route Mode tab — pick LLM backend (LM Studio / Anthropic API / Claude CLI)
+// MARK: Route Mode tab
 
 private struct RouteModeTab: View {
     @EnvironmentObject var appState: AppState
     @State private var selected: Config.RouteMode = Config.routeMode
     @State private var allowedDirs: [String] = Config.allowedDirectories
-    @State private var newDir: String = ""
-    @State private var switching = false
+    @State private var newDir:    String = ""
+    @State private var switching  = false
     @State private var statusMsg: String?
 
     var body: some View {
@@ -502,43 +748,32 @@ private struct RouteModeTab: View {
                 LabeledContent("Current", value: appState.activeRouteMode.displayName)
                 LabeledContent("Running", value: (appState.bridgeRouter?.isRunning ?? false) ? "✅ Yes" : "❌ No")
             }
-
             Section("Switch backend") {
                 Picker("Mode", selection: $selected) {
-                    ForEach(Config.RouteMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
+                    ForEach(Config.RouteMode.allCases) { m in
+                        Text(m.displayName).tag(m)
                     }
                 }
                 .pickerStyle(.radioGroup)
-
-                Text(hint(for: selected))
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                Text(modeHint(selected)).font(.system(size: 11)).foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-
                 if selected == .claudeCode {
-                    LabeledContent("Claude CLI",
-                                   value: Config.claudeCodeCLIAvailable ? "✅ Found" : "❌ Not installed")
+                    LabeledContent("Claude CLI", value: Config.claudeCodeCLIAvailable ? "✅ Found" : "❌ Not installed")
                         .font(.system(size: 11))
                 }
-
                 HStack {
                     Spacer()
                     if let msg = statusMsg {
                         Text(msg).font(.system(size: 11)).foregroundColor(.green)
                     }
-                    Button(switching ? "Switching…" : "Apply") {
-                        Task { await apply() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(switching || selected == appState.activeRouteMode)
+                    Button(switching ? "Switching…" : "Apply") { Task { await apply() } }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(switching || selected == appState.activeRouteMode)
                 }
             }
-
-            Section("PC access — directories the agent can touch") {
-                Text("Applies to Claude CLI route. Each entry is passed as --add-dir.")
+            Section("PC access — directories for Claude CLI (--add-dir)") {
+                Text("Each entry lets the CLI read and write that directory.")
                     .font(.system(size: 11)).foregroundColor(.secondary)
-
                 ForEach(allowedDirs.indices, id: \.self) { i in
                     HStack {
                         Text(allowedDirs[i]).font(.system(size: 12, design: .monospaced)).lineLimit(1)
@@ -546,43 +781,34 @@ private struct RouteModeTab: View {
                         Button(role: .destructive) {
                             allowedDirs.remove(at: i)
                             Config.setAllowedDirectories(allowedDirs)
-                        } label: { Image(systemName: "minus.circle") }
-                            .buttonStyle(.plain)
+                        } label: { Image(systemName: "minus.circle") }.buttonStyle(.plain)
                     }
                 }
-
                 HStack {
                     TextField("/absolute/path or ~/Folder", text: $newDir)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
+                        .textFieldStyle(.roundedBorder).font(.system(size: 12, design: .monospaced))
                     Button("Add") {
-                        let expanded = (newDir as NSString).expandingTildeInPath
-                        guard !expanded.isEmpty,
-                              !allowedDirs.contains(expanded) else { return }
-                        allowedDirs.append(expanded)
+                        let exp = (newDir as NSString).expandingTildeInPath
+                        guard !exp.isEmpty, !allowedDirs.contains(exp) else { return }
+                        allowedDirs.append(exp)
                         Config.setAllowedDirectories(allowedDirs)
                         newDir = ""
                     }
                 }
-
                 Button("Grant full ~/ access") {
                     allowedDirs = [NSHomeDirectory()]
                     Config.setAllowedDirectories(allowedDirs)
-                }
-                .font(.system(size: 11))
+                }.font(.system(size: 11))
             }
         }
         .formStyle(.grouped)
     }
 
-    private func hint(for mode: Config.RouteMode) -> String {
-        switch mode {
-        case .lmStudio:
-            return "Fully local. Free. Uses LM Studio + Shiro's custom tools (SQL, memory, KG, skills)."
-        case .anthropic:
-            return "Bring-your-own API key (sk-ant-…). Real Claude, billed per-token via your Anthropic account. Full Shiro tools."
-        case .claudeCode:
-            return "Uses your Claude Pro/Max subscription quota via the local `claude` CLI. Built-in CLI tools only (no Shiro memory/KG yet). Requires `claude` installed + logged in."
+    private func modeHint(_ m: Config.RouteMode) -> String {
+        switch m {
+        case .lmStudio:   return "Fully local, free. Uses LM Studio + Shiro tools (SQL, memory, skills)."
+        case .anthropic:  return "Your own API key (sk-ant-…). Real Claude, billed per-token."
+        case .claudeCode: return "Your Claude Pro/Max subscription via the local `claude` CLI. Requires `claude` installed & logged in."
         }
     }
 
@@ -607,93 +833,124 @@ private struct StatusTab: View {
                 LabeledContent("Bridge running", value: (appState.bridgeRouter?.isRunning ?? false) ? "✅ Yes" : "❌ No")
                 switch appState.activeRouteMode {
                 case .claudeCode:
-                    LabeledContent("Claude CLI", value: Config.claudeCodeCLIAvailable ? "✅ Found" : "❌ Missing")
-                    LabeledContent("PC access", value: Config.allowedDirectories.first ?? "~")
+                    LabeledContent("Claude CLI",  value: Config.claudeCodeCLIAvailable ? "✅ Found" : "❌ Missing")
+                    LabeledContent("PC access",   value: Config.allowedDirectories.first ?? "~")
                 case .anthropic:
-                    LabeledContent("API key", value: Config.anthropicEnabled ? "✅ Set" : "❌ Missing (add in API Keys tab)")
+                    LabeledContent("API key",     value: Config.anthropicEnabled ? "✅ Set" : "❌ Missing")
                 case .lmStudio:
-                    LabeledContent("LM Studio", value: appState.lmStudioConnected ? "✅ Connected" : "❌ Disconnected — start LM Studio")
-                    LabeledContent("Brain model",     value: Config.brainModel)
-                    LabeledContent("Fast model",      value: Config.fastModel)
-                    LabeledContent("Vision model",    value: Config.visionModel)
-                    LabeledContent("Embed model",     value: Config.embeddingModel)
+                    LabeledContent("LM Studio",   value: appState.lmStudioConnected ? "✅ Connected" : "❌ Disconnected")
+                    LabeledContent("Brain model", value: Config.brainModel)
+                    LabeledContent("Fast model",  value: Config.fastModel)
+                    LabeledContent("Embed model", value: Config.embeddingModel)
                 }
             }
             Section("Services") {
-                LabeledContent("Deepgram STT",  value: Config.deepgramEnabled  ? "✅ Active" : "⚪ Whisper fallback")
-                LabeledContent("Telegram",      value: Config.telegramEnabled  ? "✅ Active" : "⚪ Off — add key in API Keys tab")
+                LabeledContent("Deepgram STT",  value: Config.deepgramEnabled ? "✅ Active" : "⚪ Whisper fallback")
+                LabeledContent("Telegram",      value: Config.telegramEnabled ? "✅ Active" : "⚪ Off")
                 LabeledContent("Memory Store",  value: appState.memoryStore   != nil ? "✅ Ready" : "⚪ Unavailable")
-                LabeledContent("Skills",        value: "\(appState.skillsRegistry?.skills.count ?? 0) loaded — ~/.shiro/skills/")
-                LabeledContent("Hooks",         value: "\(appState.hooksEngine?.hooks.filter(\.enabled).count ?? 0) active — ~/.shiro/hooks.json")
+                LabeledContent("Skills",        value: "\(appState.skillsRegistry?.skills.count ?? 0) loaded")
+                LabeledContent("Hooks",         value: "\(appState.hooksEngine?.hooks.filter(\.enabled).count ?? 0) active")
+            }
+            Section("Sub-agents") {
+                LabeledContent("Active",    value: "\(appState.subAgentSessions.count)")
+                LabeledContent("Completed", value: "\(appState.subAgentCompletedCount)")
+                LabeledContent("Failed",    value: "\(appState.subAgentFailedCount)")
             }
         }
         .formStyle(.grouped)
+        .task { await appState.refreshSubAgentSessions() }
     }
 }
 
 // MARK: API Keys tab
 
 private struct APIKeysTab: View {
-    // Bound to keychain — initialise from current values
     @State private var anthropicKey:   String = KeychainHelper.get(.anthropicAPIKey)   ?? ""
     @State private var deepgramKey:    String = KeychainHelper.get(.deepgramAPIKey)    ?? ""
     @State private var telegramToken:  String = KeychainHelper.get(.telegramBotToken)  ?? ""
     @State private var telegramChatId: String = KeychainHelper.get(.telegramChatId)    ?? ""
     @State private var openAIKey:      String = KeychainHelper.get(.openAIAPIKey)      ?? ""
     @State private var openAIBase:     String = KeychainHelper.get(.openAIBaseURL)     ?? ""
+    @State private var composioKey:    String = KeychainHelper.get(.composioAPIKey)    ?? ""
+    @State private var githubToken:    String = KeychainHelper.get(.githubToken)       ?? ""
+    @State private var hfToken:        String = KeychainHelper.get(.huggingFaceToken)  ?? ""
+    @State private var pagegridKey:    String = KeychainHelper.get(.pagegridAPIKey)    ?? ""
     @State private var saved = false
 
     var body: some View {
-        Form {
-            Section {
-                Text("All keys are stored in your macOS Keychain — never in plain text or env vars.")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-            }
-
-            Section("Anthropic (BYOK — real Claude models)") {
-                SecureTextField("sk-ant-…", text: $anthropicKey)
-                if !anthropicKey.isEmpty {
-                    Text(anthropicKey.hasPrefix("sk-ant-") ? "✅ Valid format" : "⚠️ Should start with sk-ant-")
+        ScrollView {
+            Form {
+                Section {
+                    Text("All keys are stored in your macOS Keychain — never on disk in plain text.")
+                        .font(.system(size: 11)).foregroundColor(.secondary)
+                }
+                Section("Anthropic (BYOK)") {
+                    SecureTextField("sk-ant-…", text: $anthropicKey)
+                    if !anthropicKey.isEmpty {
+                        Text(anthropicKey.hasPrefix("sk-ant-") ? "✅ Valid format" : "⚠️ Should start with sk-ant-")
+                            .font(.system(size: 11))
+                            .foregroundColor(anthropicKey.hasPrefix("sk-ant-") ? .green : .orange)
+                    }
+                }
+                Section("Deepgram STT") {
+                    SecureTextField("Deepgram API key…", text: $deepgramKey)
+                }
+                Section("Telegram (remote approvals)") {
+                    SecureTextField("Bot token from @BotFather…", text: $telegramToken)
+                    TextField("Your chat ID from @userinfobot…", text: $telegramChatId).textFieldStyle(.roundedBorder)
+                }
+                Section("OpenAI-compatible endpoint") {
+                    SecureTextField("API key (or 'local' for no auth)…", text: $openAIKey)
+                    TextField("Base URL (e.g. http://localhost:1234/v1)…", text: $openAIBase).textFieldStyle(.roundedBorder)
+                }
+                Section("Composio  ▸  250+ integrations (Gmail, Slack, Notion, …)") {
+                    SecureTextField("Composio API key…", text: $composioKey)
+                    Link("Get one at app.composio.dev",
+                         destination: URL(string: "https://app.composio.dev/")!)
                         .font(.system(size: 11))
-                        .foregroundColor(anthropicKey.hasPrefix("sk-ant-") ? .green : .orange)
+                    Text("Enable the 'composio' MCP server in the MCP Servers tab after saving.")
+                        .font(.system(size: 11)).foregroundColor(.secondary)
                 }
-                Text("When set, Shiro uses real Claude (Sonnet/Opus/Haiku) instead of LM Studio.")
-                    .font(.system(size: 11)).foregroundColor(.secondary)
-            }
-
-            Section("Deepgram STT (real-time transcription)") {
-                SecureTextField("Deepgram API key…", text: $deepgramKey)
-                Text("Without this, Shiro falls back to LM Studio Whisper (slower, offline).")
-                    .font(.system(size: 11)).foregroundColor(.secondary)
-            }
-
-            Section("Telegram (remote approval relay)") {
-                SecureTextField("Bot token from @BotFather…", text: $telegramToken)
-                TextField("Your chat ID from @userinfobot…", text: $telegramChatId)
-                    .textFieldStyle(.roundedBorder)
-                Text("Lets you approve/deny high-risk tools from your phone.")
-                    .font(.system(size: 11)).foregroundColor(.secondary)
-            }
-
-            Section("OpenAI-compatible (any local or cloud endpoint)") {
-                SecureTextField("API key (or 'local' for no auth)…", text: $openAIKey)
-                TextField("Base URL (e.g. http://localhost:1234/v1)…", text: $openAIBase)
-                    .textFieldStyle(.roundedBorder)
-            }
-
-            HStack {
-                Spacer()
-                if saved {
-                    Label("Saved!", systemImage: "checkmark.circle.fill")
-                        .foregroundColor(.green).font(.system(size: 12))
+                Section("GitHub  ▸  repo / gist / org access") {
+                    SecureTextField("Personal access token (ghp_…)", text: $githubToken)
+                    Link("Create a token at github.com/settings/tokens",
+                         destination: URL(string: "https://github.com/settings/tokens")!)
+                        .font(.system(size: 11))
+                    Text("Scopes recommended: repo, read:org, gist, read:user.")
+                        .font(.system(size: 11)).foregroundColor(.secondary)
                 }
-                Button("Save to Keychain") { saveAll() }
-                    .buttonStyle(.borderedProminent)
+                Section("Hugging Face  ▸  hub access") {
+                    SecureTextField("HF token (hf_…)", text: $hfToken)
+                    Link("Create one at huggingface.co/settings/tokens",
+                         destination: URL(string: "https://huggingface.co/settings/tokens")!)
+                        .font(.system(size: 11))
+                }
+                Section("PageGrid  ▸  AI documentation search") {
+                    SecureTextField("sk-pgrid-…", text: $pagegridKey)
+                    Link("Docs at pagegrid.in/docs",
+                         destination: URL(string: "https://pagegrid.in/docs")!)
+                        .font(.system(size: 11))
+                    if !pagegridKey.isEmpty {
+                        Text(pagegridKey.hasPrefix("sk-pgrid-") ? "✅ Valid format" : "⚠️ Expected sk-pgrid- prefix")
+                            .font(.system(size: 11))
+                            .foregroundColor(pagegridKey.hasPrefix("sk-pgrid-") ? .green : .orange)
+                    }
+                }
+                Section {
+                    HStack {
+                        Spacer()
+                        if saved {
+                            Label("Saved!", systemImage: "checkmark.circle.fill")
+                                .foregroundColor(.green).font(.system(size: 12))
+                        }
+                        Button("Save to Keychain") { saveAll() }.buttonStyle(.borderedProminent)
+                    }
+                    Text("Most key changes apply to the next bridge restart — toggle the route in the Route tab to apply immediately.")
+                        .font(.system(size: 10.5)).foregroundColor(.secondary)
+                }
             }
-            .padding(.top, 4)
+            .formStyle(.grouped)
         }
-        .formStyle(.grouped)
     }
 
     private func saveAll() {
@@ -703,34 +960,114 @@ private struct APIKeysTab: View {
         KeychainHelper.set(telegramChatId, for: .telegramChatId)
         KeychainHelper.set(openAIKey,      for: .openAIAPIKey)
         KeychainHelper.set(openAIBase,     for: .openAIBaseURL)
+        KeychainHelper.set(composioKey,    for: .composioAPIKey)
+        KeychainHelper.set(githubToken,    for: .githubToken)
+        KeychainHelper.set(hfToken,        for: .huggingFaceToken)
+        KeychainHelper.set(pagegridKey,    for: .pagegridAPIKey)
         saved = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { saved = false }
     }
 }
 
-// Secure text field wrapper
 private struct SecureTextField: View {
     let placeholder: String
     @Binding var text: String
     @State private var isVisible = false
-
-    init(_ placeholder: String, text: Binding<String>) {
-        self.placeholder = placeholder
-        self._text = text
-    }
-
+    init(_ placeholder: String, text: Binding<String>) { self.placeholder = placeholder; self._text = text }
     var body: some View {
         HStack {
-            if isVisible {
-                TextField(placeholder, text: $text).textFieldStyle(.roundedBorder)
-            } else {
-                SecureField(placeholder, text: $text).textFieldStyle(.roundedBorder)
-            }
+            if isVisible { TextField(placeholder, text: $text).textFieldStyle(.roundedBorder) }
+            else          { SecureField(placeholder, text: $text).textFieldStyle(.roundedBorder) }
             Button { isVisible.toggle() } label: {
-                Image(systemName: isVisible ? "eye.slash" : "eye")
+                Image(systemName: isVisible ? "eye.slash" : "eye").foregroundColor(.secondary)
+            }.buttonStyle(.plain)
+        }
+    }
+}
+
+// MARK: Error Log tab
+
+private struct ErrorLogTab: View {
+    @EnvironmentObject var appState: AppState
+
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("\(appState.errorLog.count) error\(appState.errorLog.count == 1 ? "" : "s")")
+                    .font(.custom("JetBrains Mono", size: 11))
                     .foregroundColor(.secondary)
+                Spacer()
+                if !appState.errorLog.isEmpty {
+                    Button("Clear") { appState.errorLog.removeAll() }
+                        .font(.system(size: 11))
+                        .foregroundColor(.red)
+                        .buttonStyle(.plain)
+                }
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            if appState.errorLog.isEmpty {
+                Spacer()
+                HStack {
+                    Spacer()
+                    VStack(spacing: 8) {
+                        Image(systemName: "checkmark.shield.fill")
+                            .font(.system(size: 28))
+                            .foregroundColor(.green.opacity(0.6))
+                        Text("No errors recorded")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                Spacer()
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: true) {
+                        LazyVStack(alignment: .leading, spacing: 1) {
+                            ForEach(appState.errorLog.reversed()) { item in
+                                HStack(alignment: .top, spacing: 10) {
+                                    Text(Self.timeFormatter.string(from: item.timestamp))
+                                        .font(.custom("JetBrains Mono", size: 10))
+                                        .foregroundColor(.secondary)
+                                        .frame(width: 56, alignment: .leading)
+
+                                    Text("[\(item.source)]")
+                                        .font(.custom("JetBrains Mono", size: 10))
+                                        .foregroundColor(Color(hex: "#D97757"))
+                                        .frame(minWidth: 60, alignment: .leading)
+
+                                    Text(item.message)
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.primary)
+                                        .textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
+
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color(hex: "#1A1916").opacity(0.5))
+                                .id(item.id)
+                            }
+                        }
+                    }
+                    .onChange(of: appState.errorLog.count) { _, _ in
+                        if let last = appState.errorLog.last {
+                            withAnimation { proxy.scrollTo(last.id) }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -739,19 +1076,15 @@ private struct SecureTextField: View {
 
 private struct MCPTab: View {
     @EnvironmentObject var appState: AppState
-
     var body: some View {
         Form {
             Section("MCP Servers  (\(appState.mcpRegistry?.enabledCount ?? 0) enabled)") {
                 if let registry = appState.mcpRegistry {
                     ForEach(registry.servers) { server in
                         HStack(spacing: 8) {
-                            Circle()
-                                .fill(server.enabled ? Color(hex: "#00FF85") : Color(hex: "#3A3A3A"))
-                                .frame(width: 7, height: 7)
+                            Circle().fill(server.enabled ? Color.vActive : Color.vBorder).frame(width: 7, height: 7)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(server.name)
-                                    .font(.custom("JetBrains Mono", size: 12))
+                                Text(server.name).font(.custom("JetBrains Mono", size: 12))
                                 if let desc = server.description {
                                     Text(desc).font(.system(size: 10)).foregroundColor(.secondary).lineLimit(1)
                                 }
@@ -775,7 +1108,1068 @@ private struct MCPTab: View {
     }
 }
 
-// MARK: - Color + Corner helpers
+// MARK: UI Preferences tab
+
+private struct UIPrefsTab: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        Form {
+            Section("Layout") {
+                Toggle("Show agents panel", isOn: $appState.uiShowAgentsPanel)
+                    .onChange(of: appState.uiShowAgentsPanel) { _, _ in appState.saveUIPreferences() }
+                Toggle("Show tool feed panel", isOn: $appState.uiShowToolFeed)
+                    .onChange(of: appState.uiShowToolFeed) { _, _ in appState.saveUIPreferences() }
+            }
+            Section("Sub-agent display style") {
+                Picker("Style", selection: $appState.uiSubAgentStyle) {
+                    ForEach(SubAgentDisplayStyle.allCases, id: \.self) { style in
+                        Text(style.label).tag(style)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+                .onChange(of: appState.uiSubAgentStyle) { _, _ in appState.saveUIPreferences() }
+                Text("Inline: sub-agent activity appears inside the chat thread.\nPanel: dedicated side panel with agent cards.\nTree: collapsible tree showing the agent hierarchy.")
+                    .font(.system(size: 11)).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Section("Browser Control") {
+                Toggle("Enable continuous screen capture", isOn: Binding(
+                    get:  { appState.browserControlEnabled },
+                    set:  { appState.setBrowserControl($0) }
+                ))
+                Text("When enabled, Shiro captures your screen periodically and can use that context to assist you. Requires Screen Recording permission.")
+                    .font(.system(size: 11)).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let summary = appState.latestScreenSummary {
+                    LabeledContent("Last capture", value: summary)
+                        .font(.system(size: 11))
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+// MARK: Policies tab
+
+private struct PoliciesTab: View {
+    @EnvironmentObject var appState: AppState
+    @State private var askMediumRisk: Bool = Config.askBeforeMediumRisk
+    @State private var showVetoToast: Bool = Config.showMediumRiskVetoToast
+
+    private let amber  = Color(hex: "#FFB800")
+    private let green  = Color(hex: "#00FF85")
+    private let red    = Color(hex: "#FF4545")
+    private let mono   = Font.custom("JetBrains Mono", size: 11)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // ── Risk-tier customization ───────────────────────────────────
+            VStack(alignment: .leading, spacing: 8) {
+                Text("RISK-TIER BEHAVIOR")
+                    .font(.custom("JetBrains Mono", size: 10))
+                    .fontWeight(.bold)
+                    .tracking(0.6)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 10)
+
+                VStack(spacing: 0) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Ask before medium-risk actions")
+                                .font(.system(size: 12))
+                            Text("Show full approval card (same as high-risk). Off = auto-approve.")
+                                .font(.system(size: 10.5))
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $askMediumRisk)
+                            .labelsHidden()
+                            .onChange(of: askMediumRisk) { _, v in Config.askBeforeMediumRisk = v }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+
+                    Divider().padding(.horizontal, 12)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Show 3-second veto toast")
+                                .font(.system(size: 12))
+                                .foregroundColor(askMediumRisk ? .secondary : .primary)
+                            Text("Brief notification with Veto button before auto-approving.")
+                                .font(.system(size: 10.5))
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $showVetoToast)
+                            .labelsHidden()
+                            .disabled(askMediumRisk)
+                            .onChange(of: showVetoToast) { _, v in Config.showMediumRiskVetoToast = v }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
+                .background(Color(hex: "#25221E"))
+                .cornerRadius(8)
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(hex: "#3A3530"), lineWidth: 1))
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
+            }
+
+            Divider()
+
+            // Header
+            HStack {
+                Text("\(appState.consentGate?.policies.count ?? 0) saved rule\(appState.consentGate?.policies.count == 1 ? "" : "s")")
+                    .font(mono)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button {
+                    Task { await appState.consentGate?.reloadPolicies() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            if let gate = appState.consentGate, !gate.policies.isEmpty {
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 1) {
+                        ForEach(gate.policies) { entry in
+                            PolicyRow(entry: entry, gate: gate)
+                        }
+                    }
+                }
+            } else {
+                Spacer()
+                HStack {
+                    Spacer()
+                    VStack(spacing: 8) {
+                        Image(systemName: "checkmark.shield")
+                            .font(.system(size: 28))
+                            .foregroundColor(.secondary.opacity(0.5))
+                        Text("No saved policies.")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                        Text("Use 'Always Allow' or 'Never Allow' on approval cards to create one.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary.opacity(0.7))
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 280)
+                    }
+                    Spacer()
+                }
+                Spacer()
+            }
+        }
+    }
+}
+
+private struct PolicyRow: View {
+    let entry: ConsentGate.PolicyEntry
+    let gate: ConsentGate
+
+    private let green = Color(hex: "#00FF85")
+    private let red   = Color(hex: "#FF4545")
+    private let amber = Color(hex: "#FFB800")
+    private let mono  = Font.custom("JetBrains Mono", size: 11)
+
+    private static let dateFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "MMM d, HH:mm"; return f
+    }()
+
+    var body: some View {
+        HStack(spacing: 10) {
+            // Policy badge
+            Text(entry.policy == "always_allow" ? "ALLOW" : "DENY")
+                .font(.custom("JetBrains Mono", size: 9))
+                .fontWeight(.bold)
+                .tracking(0.8)
+                .foregroundColor(entry.policy == "always_allow" ? .black : .white)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(entry.policy == "always_allow" ? green : red)
+                .cornerRadius(3)
+
+            // Tool name
+            Text(entry.toolName)
+                .font(mono)
+                .foregroundColor(.primary)
+                .lineLimit(1)
+
+            Spacer()
+
+            // Timestamp
+            Text(Self.dateFmt.string(from: entry.updatedAt))
+                .font(.custom("JetBrains Mono", size: 10))
+                .foregroundColor(.secondary)
+
+            // Revoke button
+            Button {
+                Task { await gate.revokePolicy(toolName: entry.toolName) }
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 11))
+                    .foregroundColor(red.opacity(0.8))
+            }
+            .buttonStyle(.plain)
+            .help("Revoke — tool will ask again next time")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Color(hex: "#1A1916").opacity(0.4))
+    }
+}
+
+// MARK: Audit tab
+
+private struct AuditTab: View {
+    @EnvironmentObject var appState: AppState
+    @State private var approvals: [ToolApproval] = []
+    @State private var filter: AuditFilter = .all
+    @State private var search: String = ""
+    @State private var loading = false
+
+    enum AuditFilter: String, CaseIterable {
+        case all = "All"
+        case approved = "Approved"
+        case denied = "Denied"
+        case auto = "Auto"
+    }
+
+    private static let dateFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "MMM d HH:mm:ss"; return f
+    }()
+
+    private var filtered: [ToolApproval] {
+        approvals.filter { item in
+            let matchesFilter: Bool
+            switch filter {
+            case .all:      matchesFilter = true
+            case .approved: matchesFilter = item.decision == "approved" || item.decision == "remembered_allow"
+            case .denied:   matchesFilter = item.decision == "denied" || item.decision == "remembered_deny"
+            case .auto:     matchesFilter = item.decision == "auto_approved"
+            }
+            let matchesSearch = search.isEmpty ||
+                item.toolName.localizedCaseInsensitiveContains(search) ||
+                item.decision.localizedCaseInsensitiveContains(search)
+            return matchesFilter && matchesSearch
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Toolbar
+            HStack(spacing: 8) {
+                // Search
+                HStack(spacing: 4) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    TextField("Filter by tool…", text: $search)
+                        .font(.custom("JetBrains Mono", size: 11))
+                        .textFieldStyle(.plain)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color(hex: "#111111"))
+                .cornerRadius(5)
+                .frame(maxWidth: 180)
+
+                Spacer()
+
+                // Filter pills
+                HStack(spacing: 4) {
+                    ForEach(AuditFilter.allCases, id: \.self) { f in
+                        Button(f.rawValue) { filter = f }
+                            .font(.custom("JetBrains Mono", size: 10))
+                            .foregroundColor(filter == f ? .black : .secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(filter == f ? Color(hex: "#D97757") : Color(hex: "#222222"))
+                            .cornerRadius(4)
+                            .buttonStyle(.plain)
+                    }
+                }
+
+                // Refresh
+                Button {
+                    Task { await loadApprovals() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11))
+                        .rotationEffect(loading ? .degrees(360) : .zero)
+                        .animation(loading ? .linear(duration: 1).repeatForever(autoreverses: false) : .default, value: loading)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            if filtered.isEmpty {
+                Spacer()
+                HStack {
+                    Spacer()
+                    VStack(spacing: 6) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.system(size: 28))
+                            .foregroundColor(.secondary.opacity(0.4))
+                        Text("No records match.")
+                            .font(.system(size: 12)).foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                Spacer()
+            } else {
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 1) {
+                        ForEach(filtered, id: \.id) { item in
+                            AuditRow(item: item, gate: appState.consentGate) {
+                                Task { await loadApprovals() }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .task { await loadApprovals() }
+    }
+
+    private func loadApprovals() async {
+        loading = true
+        approvals = await appState.consentGate?.recentApprovals(limit: 200) ?? []
+        loading = false
+    }
+}
+
+private struct AuditRow: View {
+    let item: ToolApproval
+    let gate: ConsentGate?
+    let onReverted: () -> Void
+
+    private let green = Color(hex: "#00FF85")
+    private let red   = Color(hex: "#FF4545")
+    private let amber = Color(hex: "#FFB800")
+    private let mono  = Font.custom("JetBrains Mono", size: 10)
+
+    private static let dateFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "MMM d HH:mm:ss"; return f
+    }()
+
+    private var decisionColor: Color {
+        switch item.decision {
+        case "approved", "remembered_allow", "auto_approved": return green
+        case "denied", "remembered_deny":                      return red
+        default:                                               return Color.secondary
+        }
+    }
+
+    private var decisionLabel: String {
+        switch item.decision {
+        case "auto_approved":    return "AUTO"
+        case "approved":         return "OK"
+        case "denied":           return "DENY"
+        case "remembered_deny":  return "NEVER"
+        case "remembered_allow": return "ALWAYS"
+        default:                 return item.decision.uppercased()
+        }
+    }
+
+    private var channelLabel: String {
+        switch item.channel {
+        case "telegram": return "📱"
+        case "auto":     return "🤖"
+        case "timeout":  return "⏱"
+        default:         return "🖥"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(Self.dateFmt.string(from: item.createdAt))
+                .font(mono)
+                .foregroundColor(.secondary)
+                .frame(width: 110, alignment: .leading)
+
+            Text(channelLabel)
+                .font(.system(size: 10))
+
+            Text(decisionLabel)
+                .font(.custom("JetBrains Mono", size: 9))
+                .fontWeight(.bold)
+                .foregroundColor(item.decision.contains("auto") ? .black : .white)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(decisionColor)
+                .cornerRadius(3)
+
+            Text(item.toolName)
+                .font(mono)
+                .foregroundColor(.primary)
+                .lineLimit(1)
+
+            Spacer()
+
+            // Only show "Block" for approved rows — lets user flip a past approval to deny
+            if item.decision == "approved" || item.decision == "remembered_allow" {
+                Button("Block") {
+                    Task {
+                        await gate?.setPolicyManual(toolName: item.toolName, policy: "always_deny")
+                        onReverted()
+                    }
+                }
+                .font(.custom("JetBrains Mono", size: 10))
+                .foregroundColor(red.opacity(0.8))
+                .buttonStyle(.plain)
+                .help("Set always_deny policy for \(item.toolName)")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color(hex: "#1A1916").opacity(0.3))
+    }
+}
+
+// MARK: Remote Access tab
+
+private struct RemoteAccessTab: View {
+    @EnvironmentObject var appState: AppState
+    @State private var enabled:    Bool   = false
+    @State private var port:       String = "7421"
+    @State private var tokenMask:  String = "••••••••••••••••"
+    @State private var showToken:  Bool   = false
+    @State private var token:      String = ""
+    @State private var copied:     Bool   = false
+
+    var body: some View {
+        Form {
+            Section("HTTP Remote Server") {
+                Toggle("Enable server", isOn: $enabled)
+                    .onChange(of: enabled) { _, on in
+                        if on {
+                            if let srv = appState.httpRemoteServer {
+                                srv.port = UInt16(port) ?? 7421
+                                try? srv.start()
+                            }
+                        } else {
+                            appState.httpRemoteServer?.stop()
+                        }
+                    }
+
+                if let srv = appState.httpRemoteServer, srv.isRunning {
+                    LabeledContent("Status") {
+                        Label("Listening on :\(port)", systemImage: "antenna.radiowaves.left.and.right")
+                            .foregroundColor(.green)
+                            .font(.system(size: 11))
+                    }
+                } else {
+                    LabeledContent("Status", value: "Stopped")
+                }
+
+                LabeledContent("Port") {
+                    TextField("7421", text: $port)
+                        .frame(width: 70)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.custom("JetBrains Mono", size: 11))
+                }
+
+                Text("Bind to 127.0.0.1 only. Access from outside your Mac requires Tailscale.")
+                    .font(.system(size: 11)).foregroundColor(.secondary)
+            }
+
+            Section("Bearer Token") {
+                HStack {
+                    if showToken {
+                        Text(token.isEmpty ? "(none)" : token)
+                            .font(.custom("JetBrains Mono", size: 11))
+                            .textSelection(.enabled)
+                    } else {
+                        Text(tokenMask)
+                            .font(.custom("JetBrains Mono", size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button(showToken ? "Hide" : "Show") {
+                        if !showToken {
+                            token = KeychainHelper.get(.shiroRemoteToken) ?? HTTPRemoteServer.ensureToken()
+                        }
+                        showToken.toggle()
+                    }
+                    .font(.system(size: 11)).buttonStyle(.plain).foregroundColor(.secondary)
+
+                    Button("Copy") {
+                        let t = KeychainHelper.get(.shiroRemoteToken) ?? HTTPRemoteServer.ensureToken()
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(t, forType: .string)
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                    }
+                    .font(.system(size: 11)).buttonStyle(.plain)
+                    .foregroundColor(copied ? .green : .secondary)
+
+                    Button("Rotate") {
+                        token = HTTPRemoteServer.rotateToken()
+                        showToken = true
+                    }
+                    .font(.system(size: 11)).buttonStyle(.plain).foregroundColor(.orange)
+                }
+
+                Text("Include in every request: Authorization: Bearer <token>")
+                    .font(.system(size: 10)).foregroundColor(.secondary)
+            }
+
+            Section("Test (copy & run in Terminal)") {
+                let t = KeychainHelper.get(.shiroRemoteToken) ?? "YOUR_TOKEN"
+                let curlCmd = """
+curl -s -X POST http://127.0.0.1:\(port)/v1/prompt \\
+  -H 'Authorization: Bearer \(t)' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"text":"what time is it","sync":true}'
+"""
+                Text(curlCmd)
+                    .font(.custom("JetBrains Mono", size: 10))
+                    .foregroundColor(Color(hex: "#AAAAAA"))
+                    .textSelection(.enabled)
+            }
+
+            Section("iOS Shortcuts Setup") {
+                Text("See docs/REMOTE.md in the Shiro project for the full setup guide: Tailscale install, iOS Shortcut import, and voice integration.")
+                    .font(.system(size: 11)).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            enabled = appState.httpRemoteServer?.isRunning ?? false
+            if let srv = appState.httpRemoteServer {
+                port = "\(srv.port)"
+            }
+        }
+    }
+}
+
+// MARK: Budget tab
+
+private struct BudgetTab: View {
+    @EnvironmentObject var appState: AppState
+    @State private var ceilingValue: Double = 2.00
+    @State private var dailyCeilingEnabled: Bool = false
+    @State private var dailyCeilingValue: Double = 10.00
+    @State private var refreshing: Bool = false
+    @State private var confirmResetMonth: Bool = false
+
+    private let mono   = Font.custom("JetBrains Mono", size: 11)
+    private let monoSm = Font.custom("JetBrains Mono", size: 10)
+
+    private static let dateFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateStyle = .short; f.timeStyle = .short; return f
+    }()
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+
+                // ── Spend overview ────────────────────────────────────────────
+                HStack(spacing: 0) {
+                    spendCard(
+                        label: "TODAY",
+                        value: appState.costLedger?.todaySpend ?? 0,
+                        icon: "sun.max.fill",
+                        color: Color(hex: "#D4A574")
+                    )
+                    Divider().frame(maxHeight: 80)
+                    spendCard(
+                        label: "THIS MONTH",
+                        value: appState.costLedger?.monthSpend ?? 0,
+                        icon: "calendar",
+                        color: Color(hex: "#D97757")
+                    )
+                }
+                .background(Color(hex: "#25221E"))
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(hex: "#3A3530"), lineWidth: 1))
+
+                // ── Per-task ceiling slider ───────────────────────────────────
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Image(systemName: "stopwatch.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color(hex: "#D97757"))
+                        Text("DEFAULT PER-TASK CEILING")
+                            .font(.custom("JetBrains Mono", size: 10))
+                            .fontWeight(.bold)
+                            .tracking(0.6)
+                            .foregroundColor(Color(hex: "#8B847C"))
+                    }
+
+                    HStack(spacing: 10) {
+                        Text("$0.50")
+                            .font(monoSm)
+                            .foregroundColor(Color(hex: "#5C544C"))
+
+                        Slider(value: $ceilingValue, in: 0.50...20.00, step: 0.25)
+                            .tint(Color(hex: "#D97757"))
+                            .onChange(of: ceilingValue) { _, v in
+                                appState.costLedger?.taskCostCeiling = v
+                            }
+
+                        Text("$20")
+                            .font(monoSm)
+                            .foregroundColor(Color(hex: "#5C544C"))
+                    }
+
+                    HStack {
+                        Text("Current ceiling:")
+                            .font(monoSm)
+                            .foregroundColor(Color(hex: "#8B847C"))
+                        Text(String(format: "$%.2f", ceilingValue))
+                            .font(.custom("JetBrains Mono", size: 13))
+                            .fontWeight(.semibold)
+                            .foregroundColor(Color(hex: "#F2EDE5"))
+                        Text("per task")
+                            .font(monoSm)
+                            .foregroundColor(Color(hex: "#5C544C"))
+                    }
+
+                    Text("Tasks exceeding this cost will be interrupted automatically.")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(Color(hex: "#5C544C"))
+                }
+                .padding(14)
+                .background(Color(hex: "#25221E"))
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(hex: "#3A3530"), lineWidth: 1))
+
+                // ── Daily ceiling ─────────────────────────────────────────────
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Image(systemName: "gauge.with.needle")
+                            .font(.system(size: 11))
+                            .foregroundColor(dailyCeilingEnabled ? Color(hex: "#D97757") : Color(hex: "#5C544C"))
+                        Text("DAILY CEILING")
+                            .font(.custom("JetBrains Mono", size: 10))
+                            .fontWeight(.bold)
+                            .tracking(0.6)
+                            .foregroundColor(Color(hex: "#8B847C"))
+                        Spacer()
+                        Toggle("", isOn: $dailyCeilingEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .scaleEffect(0.8)
+                    }
+
+                    if dailyCeilingEnabled {
+                        HStack(spacing: 10) {
+                            Text("$1")
+                                .font(monoSm)
+                                .foregroundColor(Color(hex: "#5C544C"))
+                            Slider(value: $dailyCeilingValue, in: 1.00...100.00, step: 1.00)
+                                .tint(Color(hex: "#D97757"))
+                            Text("$100")
+                                .font(monoSm)
+                                .foregroundColor(Color(hex: "#5C544C"))
+                        }
+                        HStack {
+                            Text("Stop all tasks today after spending:")
+                                .font(monoSm)
+                                .foregroundColor(Color(hex: "#8B847C"))
+                            Text(String(format: "$%.0f", dailyCeilingValue))
+                                .font(.custom("JetBrains Mono", size: 13))
+                                .fontWeight(.semibold)
+                                .foregroundColor(Color(hex: "#F2EDE5"))
+                        }
+                    } else {
+                        Text("No daily limit. Tasks run until their per-task ceiling.")
+                            .font(.system(size: 10.5))
+                            .foregroundColor(Color(hex: "#5C544C"))
+                    }
+                }
+                .padding(14)
+                .background(Color(hex: "#25221E"))
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(hex: "#3A3530"), lineWidth: 1))
+
+                // ── Top tasks table ───────────────────────────────────────────
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Image(systemName: "list.bullet.rectangle")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color(hex: "#D97757"))
+                        Text("TOP TASKS BY COST")
+                            .font(.custom("JetBrains Mono", size: 10))
+                            .fontWeight(.bold)
+                            .tracking(0.6)
+                            .foregroundColor(Color(hex: "#8B847C"))
+                        Spacer()
+                        Button {
+                            Task {
+                                refreshing = true
+                                await appState.costLedger?.refresh()
+                                refreshing = false
+                            }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 11))
+                                .rotationEffect(refreshing ? .degrees(360) : .zero)
+                                .animation(refreshing ? .linear(duration: 1).repeatForever(autoreverses: false) : .default,
+                                           value: refreshing)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(Color(hex: "#5C544C"))
+                    }
+
+                    // Header row
+                    HStack(spacing: 0) {
+                        Text("TASK ID")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text("MODEL")
+                            .frame(width: 90, alignment: .leading)
+                        Text("DATE")
+                            .frame(width: 90, alignment: .leading)
+                        Text("COST")
+                            .frame(width: 70, alignment: .trailing)
+                    }
+                    .font(.custom("JetBrains Mono", size: 9))
+                    .fontWeight(.bold)
+                    .tracking(0.5)
+                    .foregroundColor(Color(hex: "#5C544C"))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color(hex: "#1A1916"))
+
+                    let tasks = appState.costLedger?.topTasks ?? []
+                    if tasks.isEmpty {
+                        HStack {
+                            Spacer()
+                            Text("No task cost data yet.")
+                                .font(.system(size: 11))
+                                .foregroundColor(Color(hex: "#5C544C"))
+                                .padding(.vertical, 20)
+                            Spacer()
+                        }
+                    } else {
+                        ForEach(Array(tasks.enumerated()), id: \.element.id) { idx, task in
+                            HStack(spacing: 0) {
+                                Text(task.taskId.prefix(24))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .lineLimit(1)
+                                Text(shortModel(task.model))
+                                    .frame(width: 90, alignment: .leading)
+                                Text(Self.dateFmt.string(from: task.recordedAt))
+                                    .frame(width: 90, alignment: .leading)
+                                Text(String(format: "$%.4f", task.totalCost))
+                                    .frame(width: 70, alignment: .trailing)
+                                    .foregroundColor(task.totalCost > 0.50 ? Color(hex: "#D97757") : Color(hex: "#F2EDE5"))
+                            }
+                            .font(.custom("JetBrains Mono", size: 10))
+                            .foregroundColor(Color(hex: "#F2EDE5"))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(idx % 2 == 0 ? Color(hex: "#211E1B") : Color(hex: "#1A1916"))
+                        }
+                    }
+                }
+                .background(Color(hex: "#25221E"))
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(hex: "#3A3530"), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                // ── Reset ─────────────────────────────────────────────────────
+                HStack {
+                    Spacer()
+                    if confirmResetMonth {
+                        HStack(spacing: 8) {
+                            Text("Reset monthly spend tracking?")
+                                .font(.system(size: 11))
+                                .foregroundColor(Color(hex: "#8B847C"))
+                            Button("Cancel") { confirmResetMonth = false }
+                                .font(.system(size: 11))
+                                .buttonStyle(.plain)
+                                .foregroundColor(Color(hex: "#8B847C"))
+                            Button("Confirm Reset") {
+                                confirmResetMonth = false
+                                // Note: resets the UI display only (DB records remain)
+                                appState.costLedger?.monthSpend = 0
+                            }
+                            .font(.system(size: 11))
+                            .buttonStyle(.plain)
+                            .foregroundColor(Color(hex: "#D86553"))
+                        }
+                    } else {
+                        Button("Reset month display") { confirmResetMonth = true }
+                            .font(.system(size: 11))
+                            .buttonStyle(.plain)
+                            .foregroundColor(Color(hex: "#5C544C"))
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .onAppear {
+            ceilingValue = appState.costLedger?.taskCostCeiling ?? 2.00
+            Task { await appState.costLedger?.refresh() }
+        }
+    }
+
+    private func spendCard(label: String, value: Double, icon: String, color: Color) -> some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(color)
+                Text(label)
+                    .font(.custom("JetBrains Mono", size: 9))
+                    .fontWeight(.bold)
+                    .tracking(0.6)
+                    .foregroundColor(Color(hex: "#8B847C"))
+            }
+            Text(String(format: "$%.4f", value))
+                .font(.custom("JetBrains Mono", size: 20))
+                .fontWeight(.semibold)
+                .foregroundColor(Color(hex: "#F2EDE5"))
+                .monospacedDigit()
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 18)
+    }
+
+    private func shortModel(_ model: String) -> String {
+        let m = model.lowercased()
+        if m.contains("opus")   { return "opus" }
+        if m.contains("haiku")  { return "haiku" }
+        if m.contains("sonnet") { return "sonnet" }
+        return String(model.prefix(10))
+    }
+}
+
+// MARK: - Command Palette (⌘K)
+
+private struct CommandEntry: Identifiable {
+    enum Kind { case skill, command, recent }
+    let id = UUID()
+    let kind: Kind
+    let name: String
+    let subtitle: String
+    let insertText: String
+    let icon: String
+}
+
+struct CommandPaletteView: View {
+    let appState: AppState
+    @Binding var isShown: Bool
+    let onSelect: (String) -> Void
+
+    @State private var query: String = ""
+    @State private var selectedIndex: Int = 0
+    @FocusState private var searchFocused: Bool
+
+    private let bg     = Color(hex: "#0D0D0D")
+    private let border = Color(hex: "#3A3530")
+    private let accent = Color(hex: "#D97757")
+    private let muted  = Color(hex: "#5C544C")
+    private let text   = Color(hex: "#F2EDE5")
+
+    private var allEntries: [CommandEntry] {
+        var entries: [CommandEntry] = []
+
+        // Slash commands (built-in)
+        let builtIn: [(String, String, String)] = [
+            ("/code",    "Plan + execute a coding task in VS Code", "code.branch"),
+            ("/multi",   "Multi-subtask coding plan",               "arrow.triangle.branch"),
+            ("/forecast","Generate market charts + analysis",       "chart.xyaxis.line"),
+            ("/research","Deep research with citations",            "magnifyingglass"),
+            ("/ingest",  "Ingest a document into memory",           "doc.badge.plus"),
+            ("/clear",   "Clear conversation history",              "trash"),
+            ("/status",  "Show system status",                      "info.circle"),
+        ]
+        for (cmd, desc, icon) in builtIn {
+            entries.append(CommandEntry(kind: .command, name: cmd, subtitle: desc,
+                                        insertText: cmd + " ", icon: icon))
+        }
+
+        // Skills from registry
+        if let registry = appState.skillsRegistry {
+            for skill in registry.skills {
+                entries.append(CommandEntry(kind: .skill, name: "/\(skill.name)",
+                                            subtitle: skill.description ?? "",
+                                            insertText: "/\(skill.name) ",
+                                            icon: "cpu"))
+            }
+        }
+
+        // Recent prompts (last 5 user messages)
+        let recents = appState.conversationMessages
+            .filter { $0.role == .user }
+            .suffix(5)
+            .map(\.content)
+        for (i, msg) in recents.enumerated() {
+            let short = String(msg.prefix(80))
+            entries.append(CommandEntry(kind: .recent, name: short, subtitle: "Recent",
+                                        insertText: msg, icon: "clock"))
+        }
+
+        return entries
+    }
+
+    private var filtered: [CommandEntry] {
+        guard !query.isEmpty else { return allEntries }
+        let q = query.lowercased()
+        return allEntries.filter {
+            $0.name.lowercased().contains(q) ||
+            $0.subtitle.lowercased().contains(q)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Search bar
+            HStack(spacing: 8) {
+                Image(systemName: "command")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(accent)
+                Text("K")
+                    .font(.custom("JetBrains Mono", size: 11))
+                    .foregroundColor(muted)
+                    .frame(width: 18, height: 18)
+                    .background(Color(hex: "#25221E"))
+                    .cornerRadius(3)
+
+                TextField("Type a command or search…", text: $query)
+                    .font(.custom("JetBrains Mono", size: 12.5))
+                    .foregroundColor(text)
+                    .textFieldStyle(.plain)
+                    .focused($searchFocused)
+                    .onChange(of: query) { _, _ in selectedIndex = 0 }
+                    .onKeyPress(.escape) { isShown = false; return .handled }
+                    .onKeyPress(.return) {
+                        if !filtered.isEmpty {
+                            onSelect(filtered[min(selectedIndex, filtered.count - 1)].insertText)
+                        }
+                        return .handled
+                    }
+                    .onKeyPress(.upArrow) {
+                        if selectedIndex > 0 { selectedIndex -= 1 }
+                        return .handled
+                    }
+                    .onKeyPress(.downArrow) {
+                        if selectedIndex < filtered.count - 1 { selectedIndex += 1 }
+                        return .handled
+                    }
+
+                Spacer()
+
+                // Close hint
+                Text("esc")
+                    .font(.custom("JetBrains Mono", size: 10))
+                    .foregroundColor(muted)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color(hex: "#25221E"))
+                    .cornerRadius(3)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(bg)
+
+            Divider().background(border)
+
+            // Results list
+            if filtered.isEmpty {
+                HStack {
+                    Spacer()
+                    Text("No matches")
+                        .font(.system(size: 11))
+                        .foregroundColor(muted)
+                        .padding(.vertical, 20)
+                    Spacer()
+                }
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(filtered.enumerated()), id: \.element.id) { idx, entry in
+                            PaletteRow(entry: entry, isSelected: idx == selectedIndex)
+                                .onTapGesture { onSelect(entry.insertText) }
+                        }
+                    }
+                }
+                .frame(maxHeight: 240)
+            }
+        }
+        .background(bg)
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(accent.opacity(0.3), lineWidth: 1))
+        .cornerRadius(10)
+        .shadow(color: .black.opacity(0.6), radius: 20, y: 4)
+        .padding(.horizontal, 12)
+        .onAppear { searchFocused = true }
+    }
+}
+
+private struct PaletteRow: View {
+    let entry: CommandEntry
+    let isSelected: Bool
+
+    private let accent = Color(hex: "#D97757")
+    private let muted  = Color(hex: "#8B847C")
+    private let text   = Color(hex: "#F2EDE5")
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: entry.icon)
+                .font(.system(size: 12))
+                .foregroundColor(isSelected ? accent : muted)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.name)
+                    .font(.custom("JetBrains Mono", size: 12))
+                    .foregroundColor(isSelected ? text : text.opacity(0.85))
+                    .lineLimit(1)
+                if !entry.subtitle.isEmpty {
+                    Text(entry.subtitle)
+                        .font(.system(size: 10.5))
+                        .foregroundColor(muted)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer()
+
+            // Kind badge
+            Text(kindBadge)
+                .font(.custom("JetBrains Mono", size: 9))
+                .foregroundColor(isSelected ? accent : muted.opacity(0.6))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background((isSelected ? accent : muted).opacity(0.08))
+                .cornerRadius(3)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(isSelected ? Color(hex: "#D97757").opacity(0.10) : Color.clear)
+    }
+
+    private var kindBadge: String {
+        switch entry.kind {
+        case .command: return "cmd"
+        case .skill:   return "skill"
+        case .recent:  return "recent"
+        }
+    }
+}
+
+// MARK: - Color / Corner helpers (shared)
 
 extension Color {
     init(hex: String) {
@@ -783,64 +2177,96 @@ extension Color {
         var int = UInt64()
         Scanner(string: hex).scanHexInt64(&int)
         let r = Double((int >> 16) & 0xFF) / 255
-        let g = Double((int >> 8) & 0xFF) / 255
-        let b = Double(int & 0xFF) / 255
+        let g = Double((int >> 8)  & 0xFF) / 255
+        let b = Double( int        & 0xFF) / 255
         self.init(red: r, green: g, blue: b)
     }
 }
 
 extension View {
-    func cornerRadius(_ radius: CGFloat, corners: RectCorner) -> some View {
-        clipShape(RoundedCornerShape(radius: radius, corners: corners))
+    func vCornerRadius(_ radius: CGFloat, corners: VRectCorner) -> some View {
+        clipShape(VRoundedCornerShape(radius: radius, corners: corners))
     }
 }
 
-struct RectCorner: OptionSet {
+struct VRectCorner: OptionSet {
     let rawValue: Int
-    static let topLeft = RectCorner(rawValue: 1 << 0)
-    static let topRight = RectCorner(rawValue: 1 << 1)
-    static let bottomLeft = RectCorner(rawValue: 1 << 2)
-    static let bottomRight = RectCorner(rawValue: 1 << 3)
-    static let all: RectCorner = [.topLeft, .topRight, .bottomLeft, .bottomRight]
+    static let topLeft     = VRectCorner(rawValue: 1 << 0)
+    static let topRight    = VRectCorner(rawValue: 1 << 1)
+    static let bottomLeft  = VRectCorner(rawValue: 1 << 2)
+    static let bottomRight = VRectCorner(rawValue: 1 << 3)
+    static let all: VRectCorner = [.topLeft, .topRight, .bottomLeft, .bottomRight]
 }
 
-struct RoundedCornerShape: Shape {
+struct VRoundedCornerShape: Shape {
     var radius: CGFloat
-    var corners: RectCorner
+    var corners: VRectCorner
     func path(in rect: CGRect) -> Path {
         var path = Path()
-        let tl: CGFloat = corners.contains(.topLeft) ? radius : 0
-        let tr: CGFloat = corners.contains(.topRight) ? radius : 0
-        let bl: CGFloat = corners.contains(.bottomLeft) ? radius : 0
+        let tl: CGFloat = corners.contains(.topLeft)     ? radius : 0
+        let tr: CGFloat = corners.contains(.topRight)    ? radius : 0
+        let bl: CGFloat = corners.contains(.bottomLeft)  ? radius : 0
         let br: CGFloat = corners.contains(.bottomRight) ? radius : 0
         path.move(to: CGPoint(x: rect.minX + tl, y: rect.minY))
         path.addLine(to: CGPoint(x: rect.maxX - tr, y: rect.minY))
-        path.addArc(center: CGPoint(x: rect.maxX - tr, y: rect.minY + tr), radius: tr, startAngle: .degrees(-90), endAngle: .degrees(0), clockwise: false)
+        path.addArc(center: CGPoint(x: rect.maxX - tr, y: rect.minY + tr), radius: tr,
+                    startAngle: .degrees(-90), endAngle: .degrees(0),   clockwise: false)
         path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - br))
-        path.addArc(center: CGPoint(x: rect.maxX - br, y: rect.maxY - br), radius: br, startAngle: .degrees(0), endAngle: .degrees(90), clockwise: false)
+        path.addArc(center: CGPoint(x: rect.maxX - br, y: rect.maxY - br), radius: br,
+                    startAngle: .degrees(0),   endAngle: .degrees(90),  clockwise: false)
         path.addLine(to: CGPoint(x: rect.minX + bl, y: rect.maxY))
-        path.addArc(center: CGPoint(x: rect.minX + bl, y: rect.maxY - bl), radius: bl, startAngle: .degrees(90), endAngle: .degrees(180), clockwise: false)
+        path.addArc(center: CGPoint(x: rect.minX + bl, y: rect.maxY - bl), radius: bl,
+                    startAngle: .degrees(90),  endAngle: .degrees(180), clockwise: false)
         path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + tl))
-        path.addArc(center: CGPoint(x: rect.minX + tl, y: rect.minY + tl), radius: tl, startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false)
+        path.addArc(center: CGPoint(x: rect.minX + tl, y: rect.minY + tl), radius: tl,
+                    startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false)
         path.closeSubpath()
         return path
     }
 }
 
-// Markdown theme
+// MARK: - Markdown theme
+
 extension Theme {
-    static func shiro(textColor: Color) -> Theme {
+    /// Markdown theme tuned for the Claude — Editorial Warmth palette.
+    /// Headings use the system serif; inline code uses warm gold; copper
+    /// accents anchor heading + link colors.
+    static var shiroTheme: Theme {
         Theme()
-            .text { ForegroundColor(textColor) }
-            .code { FontFamilyVariant(.monospaced); ForegroundColor(Color(hex: "#00FF85")) }
-            .strong { FontWeight(.bold) }
-            .heading1 { configuration in
-                configuration.label
-                    .markdownTextStyle { ForegroundColor(Color(hex: "#7B7BFF")); FontWeight(.bold) }
+            .text { ForegroundColor(.vText) }
+            .code { FontFamilyVariant(.monospaced); ForegroundColor(.vActive) }
+            .strong { FontWeight(.semibold) }
+            .emphasis { FontStyle(.italic) }
+            .link { ForegroundColor(.vAccent); UnderlineStyle(.single) }
+            .heading1 { cfg in
+                cfg.label.markdownTextStyle {
+                    FontFamily(.system(.serif))
+                    FontWeight(.semibold)
+                    FontSize(18)
+                    ForegroundColor(.vText)
+                }
             }
-            .heading2 { configuration in
-                configuration.label
-                    .markdownTextStyle { ForegroundColor(Color(hex: "#7B7BFF")); FontWeight(.semibold) }
+            .heading2 { cfg in
+                cfg.label.markdownTextStyle {
+                    FontFamily(.system(.serif))
+                    FontWeight(.semibold)
+                    FontSize(16)
+                    ForegroundColor(.vText)
+                }
+            }
+            .heading3 { cfg in
+                cfg.label.markdownTextStyle {
+                    FontWeight(.semibold)
+                    ForegroundColor(.vAccent)
+                }
+            }
+            .blockquote { cfg in
+                cfg.label
+                    .padding(.leading, 12)
+                    .overlay(alignment: .leading) {
+                        Rectangle().fill(Color.vAccent.opacity(0.6)).frame(width: 2)
+                    }
+                    .markdownTextStyle { ForegroundColor(.vMuted); FontStyle(.italic) }
             }
     }
 }

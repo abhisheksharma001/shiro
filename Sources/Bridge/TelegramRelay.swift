@@ -3,14 +3,18 @@ import Foundation
 // MARK: - TelegramRelay
 //
 // Runs a long-poll loop against the Telegram Bot API.
-// When ConsentGate suspends on a high-risk tool call:
-//   1. Sends a formatted message with inline keyboard (✅ Approve / ❌ Deny / 🚫 Never).
-//   2. Polls getUpdates; when the user taps a button, resolves the ConsentGate continuation.
-//   3. Edits the original message to show the final decision + timestamp.
+//
+// Approval flow (existing):
+//   1. ConsentGate calls sendApprovalCard() → shows inline buttons.
+//   2. User taps button → callback_query → resolves ConsentGate continuation.
+//
+// Bidirectional chat (Phase 1):
+//   3. Free-text messages → runRemotePrompt on AppState → stream reply back.
+//   4. Slash commands: /start /cancel /model /status /code
 //
 // Thread model:
-//   - All public methods are @MainActor (called from ConsentGate).
-//   - The poll loop runs as a detached Task; callbackQuery handling dispatches back to MainActor.
+//   - All public methods are @MainActor (called from ConsentGate / AppState).
+//   - The poll loop runs as a detached Task; dispatch back to MainActor as needed.
 
 @MainActor
 final class TelegramRelay {
@@ -21,17 +25,29 @@ final class TelegramRelay {
     private let chatId: String
     /// Weak ref set by AppState so we can resolve continuations.
     weak var consentGate: ConsentGate?
+    /// Weak ref set by AppState so we can run prompts.
+    weak var appState: AppState?
 
     // MARK: - State
 
     /// callId → messageId of the Telegram message showing that approval request.
     private var pendingMessages: [String: Int] = [:]
+    /// planId → CodingPlan — stored while waiting for Telegram approve/cancel button.
+    private var pendingPlans: [String: CodingPlan] = [:]
+    /// key → MultiCodingPlan — stored while waiting for Telegram multi-approve.
+    private var pendingMultiPlans: [String: MultiCodingPlan] = [:]
     /// Last seen update_id from getUpdates (for offset tracking).
     private var updateOffset: Int = 0
     /// True while the poll loop should keep running.
     private var polling = false
     /// Running poll task — cancelled on `stop()`.
     private var pollTask: Task<Void, Never>?
+    /// Active streaming task — cancelled on /cancel.
+    private var activeStreamTask: Task<Void, Never>?
+    // [B5-fix] Per-message accumulators for streamChunk live streaming (RemoteInbox path).
+    // Stored in class body — Swift extensions cannot hold stored properties.
+    var chunkAccumulators:  [String: String] = [:]
+    var lastChunkEditDates: [String: Date]   = [:]
     /// Instance-owned URLSession for all Telegram HTTP calls.
     private let wsSession: URLSession = {
         let c = URLSessionConfiguration.default
@@ -62,6 +78,8 @@ final class TelegramRelay {
         polling = false
         pollTask?.cancel()
         pollTask = nil
+        activeStreamTask?.cancel()
+        activeStreamTask = nil
     }
 
     // MARK: - Send approval card
@@ -78,8 +96,7 @@ final class TelegramRelay {
         let prettyInput: String
         if let data = try? JSONSerialization.data(withJSONObject: input, options: .prettyPrinted),
            let str = String(data: data, encoding: .utf8) {
-            // Truncate to 800 chars so message doesn't overflow Telegram limits
-            prettyInput = str.count > 800 ? String(str.prefix(800)) + "\n…(truncated)" : str
+            prettyInput = str.count > 800 ? String(str.prefix(800)) + "\n...(truncated)" : str
         } else {
             prettyInput = input.map { "\($0.key): \($0.value)" }.joined(separator: "\n")
         }
@@ -103,11 +120,16 @@ Tap a button to decide ↓
 """
 
         let keyboard: [String: Any] = [
-            "inline_keyboard": [[
-                ["text": "✅ Approve", "callback_data": "approve:\(callId)"],
-                ["text": "❌ Deny",    "callback_data": "deny:\(callId)"],
-                ["text": "🚫 Never",  "callback_data": "never:\(callId)"]
-            ]]
+            "inline_keyboard": [
+                [
+                    ["text": "✅ Approve", "callback_data": "approve:\(callId)"],
+                    ["text": "❌ Deny",    "callback_data": "deny:\(callId)"]
+                ],
+                [
+                    ["text": "🛡 Always", "callback_data": "always:\(callId)"],
+                    ["text": "🚫 Never",  "callback_data": "never:\(callId)"]
+                ]
+            ]
         ]
 
         do {
@@ -132,10 +154,11 @@ Tap a button to decide ↓
 
         let emoji: String
         switch decision {
-        case "approved":       emoji = "✅"
-        case "denied":         emoji = "❌"
-        case "remembered_deny": emoji = "🚫 (never allow)"
-        default:               emoji = "ℹ️"
+        case "approved":         emoji = "✅"
+        case "denied":           emoji = "❌"
+        case "remembered_deny":  emoji = "🚫 (never allow)"
+        case "remembered_allow": emoji = "🛡 (always allow)"
+        default:                 emoji = "ℹ️"
         }
 
         let text = "\(emoji) *\(decision.uppercased())* — resolved at \(timestamp())"
@@ -159,7 +182,6 @@ Tap a button to decide ↓
     // MARK: - Poll loop
 
     private func pollLoop() async {
-        // Exponential backoff for transient network errors: 1, 2, 4, …, 60s.
         var backoff: TimeInterval = 1
         while await isPollActive() {
             do {
@@ -169,7 +191,7 @@ Tap a button to decide ↓
                     try Task.checkCancellation()
                     await handleUpdate(update)
                 }
-                backoff = 1  // reset on success
+                backoff = 1
             } catch is CancellationError {
                 return
             } catch {
@@ -177,9 +199,7 @@ Tap a button to decide ↓
                 do {
                     try Task.checkCancellation()
                     try await Task.sleep(for: .seconds(backoff))
-                } catch {
-                    return
-                }
+                } catch { return }
                 backoff = min(backoff * 2, 60)
             }
         }
@@ -190,61 +210,462 @@ Tap a button to decide ↓
     private func getUpdates() async throws -> [[String: Any]] {
         let params: [String: Any] = [
             "offset":          updateOffset + 1,
-            "timeout":         25,      // long-poll up to 25s
-            "allowed_updates": ["callback_query"]
+            "timeout":         25,
+            "allowed_updates": ["callback_query", "message"]   // Phase 1: include message
         ]
         let response = try await apiCall(method: "getUpdates", params: params)
         guard let result = response["result"] as? [[String: Any]] else { return [] }
-
-        // Advance offset
         if let last = result.last, let id = last["update_id"] as? Int {
             updateOffset = id
         }
         return result
     }
 
+    // MARK: - Update handler
+
     private func handleUpdate(_ update: [String: Any]) async {
-        guard let callback = update["callback_query"] as? [String: Any],
-              let data = callback["data"] as? String,
-              let cbId = callback["id"] as? String else { return }
 
-        // Acknowledge the callback immediately so Telegram removes the loading state
-        _ = try? await apiCall(method: "answerCallbackQuery", params: ["callback_query_id": cbId])
+        // ── Inline-button callback ─────────────────────────────────────────
+        if let callback = update["callback_query"] as? [String: Any],
+           let data = callback["data"] as? String,
+           let cbId = callback["id"] as? String {
+            _ = try? await apiCall(method: "answerCallbackQuery", params: ["callback_query_id": cbId])
+            let parts = data.split(separator: ":", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { return }
+            let action = parts[0], value = parts[1]
 
-        // Parse "action:callId"
-        let parts = data.split(separator: ":", maxSplits: 1).map(String.init)
-        guard parts.count == 2 else { return }
-        let action = parts[0]
-        let callId = parts[1]
-
-        // Resolve on MainActor
-        await MainActor.run { [weak self] in
-            guard let self, let gate = self.consentGate else { return }
-            let decision: ConsentGate.ApprovalDecision
-            switch action {
-            case "approve": decision = .approved
-            case "deny":    decision = .denied(reason: "Denied via Telegram")
-            case "never":   decision = .rememberDeny
-            default:        return
+            // ── Multi-plan approval ───────────────────────────────────────
+            if action == "multi_execute" || action == "multi_cancel" {
+                if action == "multi_execute", let plan = pendingMultiPlans.removeValue(forKey: "latest") {
+                    Task { [weak self] in
+                        guard let self else { return }
+                        var streamMsgId: Int? = nil
+                        if let resp = try? await self.apiCall(method: "sendMessage", params: [
+                            "chat_id":    self.chatId,
+                            "text":       "⏳ _Running \(plan.subtasks.count) subtasks in parallel…_",
+                            "parse_mode": "Markdown"
+                        ]) { streamMsgId = (resp["result"] as? [String: Any])?["message_id"] as? Int }
+                        let token = streamMsgId.map(String.init)
+                        do {
+                            try await self.appState?.codingOrchestrator?.executeMulti(plan, sink: self, replyToken: token)
+                        } catch {
+                            await self.notify("❌ Multi-plan failed: \(error.localizedDescription)")
+                        }
+                    }
+                } else {
+                    pendingMultiPlans.removeValue(forKey: "latest")
+                    await notify("❌ Multi-plan cancelled.")
+                }
+                return
             }
-            gate.resolve(callId: callId, decision: decision, channel: "telegram")
+
+            // ── Coding plan approval ──────────────────────────────────────
+            if action == "code_execute" || action == "code_cancel" {
+                guard let plan = pendingPlans.removeValue(forKey: value) else { return }
+                // Edit the plan preview message
+                if let msgId = pendingMessages.removeValue(forKey: "plan_\(value)") {
+                    let resultText = action == "code_execute"
+                        ? "✅ *Executing plan…*\nOpening VS Code + Claude Code."
+                        : "❌ *Cancelled.*"
+                    _ = try? await apiCall(method: "editMessageText", params: [
+                        "chat_id":    chatId,
+                        "message_id": msgId,
+                        "text":       resultText,
+                        "parse_mode": "Markdown"
+                    ])
+                }
+                if action == "code_execute" {
+                    Task { [weak self] in
+                        guard let self, let orch = self.appState?.codingOrchestrator else { return }
+                        // Send a streaming placeholder message and capture its id
+                        var streamMsgId: Int? = nil
+                        if let resp = try? await self.apiCall(method: "sendMessage", params: [
+                            "chat_id":    self.chatId,
+                            "text":       "⏳ _Running headless…_",
+                            "parse_mode": "Markdown"
+                        ]), let result = resp["result"] as? [String: Any] {
+                            streamMsgId = result["message_id"] as? Int
+                        }
+                        // Wire sink so ClaudeCodeRunner streams back to this Telegram chat
+                        orch.remoteSink       = self
+                        orch.streamReplyToken = streamMsgId.map(String.init)
+                        do {
+                            try await orch.executePlan(plan)
+                        } catch {
+                            await self.notify("❌ Execute failed: \(error.localizedDescription)")
+                        }
+                    }
+                }
+                return
+            }
+
+            // ── Consent gate approval (existing flow) ─────────────────────
+            await MainActor.run { [weak self] in
+                guard let self, let gate = self.consentGate else { return }
+                let decision: ConsentGate.ApprovalDecision
+                switch action {
+                case "approve": decision = .approved
+                case "deny":    decision = .denied(reason: "Denied via Telegram")
+                case "never":   decision = .rememberDeny
+                case "always":  decision = .rememberAllow
+                default: return
+                }
+                gate.resolve(callId: value, decision: decision, channel: "telegram")
+            }
+            return
         }
+
+        // ── Free-text message (Phase 1) ────────────────────────────────────
+        guard let message  = update["message"] as? [String: Any],
+              let chat     = message["chat"] as? [String: Any],
+              let chatIdInt = chat["id"] as? Int,
+              String(chatIdInt) == self.chatId,
+              let text     = message["text"] as? String else { return }
+
+        if text.hasPrefix("/") {
+            await handleCommand(text)
+        } else {
+            await handleIncomingText(text)
+        }
+    }
+
+    // MARK: - Slash commands
+
+    private func handleCommand(_ text: String) async {
+        let parts = text.split(separator: " ", maxSplits: 1).map(String.init)
+        let cmd   = parts[0].lowercased()
+        let args  = parts.count > 1 ? parts[1] : ""
+
+        switch cmd {
+        case "/start":
+            await notify("""
+👋 *Shiro is online.*
+
+Send me anything and I'll run it through the agent.
+
+*Commands:*
+`/status` — current model + task state
+`/model sonnet|opus|haiku` — switch model
+`/cancel` — stop running task
+`/code <task>` — plan + launch Claude Code in VS Code
+`/repos` — list your GitHub repos
+`/clone owner/repo` — clone a GitHub repo to ~/Projects
+`/multi <task>` — decompose task into parallel subtasks
+`/agents` — list saved subagent definitions
+`/agents-suggest` — auto-detect patterns in task history
+`/agents-save <n>` — save a suggested agent definition
+""")
+
+        case "/cancel":
+            activeStreamTask?.cancel()
+            activeStreamTask = nil
+            await MainActor.run { [weak self] in
+                guard let self, let appState = self.appState else { return }
+                appState.agentCoordinator?.bridge?.interrupt(sessionKey: "main")
+                appState.acpBridge?.interrupt(sessionKey: "main")
+                appState.isRemoteProcessing = false
+                appState.isProcessing       = false
+                appState.isTypingMain       = false
+                appState.agentStatus        = .idle
+                // Also cancel any active headless runner (Phase 4)
+                Task { await appState.codingOrchestrator?.cancelHeadless() }
+            }
+            await notify("🛑 Task cancelled.")
+
+        case "/status":
+            await MainActor.run { [weak self] in
+                guard let self, let appState = self.appState else { return }
+                let model   = Config.activeModel ?? "default"
+                let running = appState.isRemoteProcessing ? "🔄 Running" : "💤 Idle"
+                let route   = appState.activeRouteMode.displayName
+                Task { [weak self] in
+                    await self?.notify("*Status:* \(running)\n*Route:* \(route)\n*Model:* `\(model)`")
+                }
+            }
+
+        case "/model":
+            let name = args.trimmingCharacters(in: .whitespaces).lowercased()
+            let valid = ["sonnet", "opus", "haiku",
+                         "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"]
+            if name.isEmpty || !valid.contains(where: { name.contains($0) }) {
+                await notify("Usage: `/model sonnet|opus|haiku`")
+                return
+            }
+            let resolved: String
+            if name.contains("opus")   { resolved = "claude-opus-4-6" }
+            else if name.contains("haiku") { resolved = "claude-haiku-4-5" }
+            else                       { resolved = "claude-sonnet-4-6" }
+            Config.setActiveModel(resolved)
+            await notify("✅ Model set to `\(resolved)`")
+
+        case "/code":
+            if args.isEmpty {
+                await notify("Usage: `/code <task description>`")
+                return
+            }
+            guard let orch = appState?.codingOrchestrator else {
+                await notify("❌ CodingOrchestrator not ready.")
+                return
+            }
+            await notify("⚙️ _Planning coding task…_")
+            do {
+                let plan = try await orch.plan(task: args)
+                let preview = """
+*Plan ready*
+📁 Project: `\(plan.workspaceName)`
+🌿 Branch: `\(plan.branchName)`
+⚙️ Mode: `\(plan.mode.rawValue)`
+💰 Budget: $\(String(format: "%.2f", plan.maxCostUSD))
+
+\(plan.prompt.prefix(300))
+"""
+                // Send plan + inline approve/skip buttons
+                let keyboard: [String: Any] = [
+                    "inline_keyboard": [[
+                        ["text": "✅ Execute", "callback_data": "code_execute:\(plan.id)"],
+                        ["text": "❌ Cancel",  "callback_data": "code_cancel:\(plan.id)"]
+                    ]]
+                ]
+                let resp = try? await apiCall(method: "sendMessage", params: [
+                    "chat_id":      chatId,
+                    "text":         preview,
+                    "parse_mode":   "Markdown",
+                    "reply_markup": keyboard
+                ])
+                // Store plan in orchestrator for callback resolution
+                await MainActor.run {
+                    orch.activePlans[plan.branchName] = plan
+                    // Store for button callback lookup: reuse pendingMessages with plan.id key
+                }
+                if let msgId = (resp?["result"] as? [String: Any])?["message_id"] as? Int {
+                    pendingMessages["plan_\(plan.id)"] = msgId
+                }
+                // Store plan reference for callback
+                pendingPlans[plan.id] = plan
+            } catch {
+                await notify("❌ Planning failed: \(error.localizedDescription)")
+            }
+
+        case "/multi":
+            if args.isEmpty {
+                await notify("Usage: `/multi <complex task>`\n\nShiro decomposes it into parallel subtasks, each running in its own worktree.")
+                return
+            }
+            guard let orch = appState?.codingOrchestrator else {
+                await notify("❌ CodingOrchestrator not ready.")
+                return
+            }
+            await notify("🧠 _Decomposing into subtasks…_")
+            do {
+                let multiPlan = try await orch.planMulti(task: args)
+                var preview = "*Multi-task plan (\(multiPlan.subtasks.count) subtasks):*\n"
+                for (i, sub) in multiPlan.subtasks.enumerated() {
+                    let deps = sub.dependsOn.isEmpty ? "" : " _(after: \(sub.dependsOn.joined(separator: ", ")))_"
+                    preview += "\n\(i+1). **\(sub.title)**\(deps)\n`\(sub.branchName)`"
+                }
+                let keyboard: [String: Any] = [
+                    "inline_keyboard": [[
+                        ["text": "✅ Run all", "callback_data": "multi_execute:\(UUID().uuidString)"],
+                        ["text": "❌ Cancel",  "callback_data": "multi_cancel:0"]
+                    ]]
+                ]
+                let resp = try? await apiCall(method: "sendMessage", params: [
+                    "chat_id":      chatId,
+                    "text":         preview,
+                    "parse_mode":   "Markdown",
+                    "reply_markup": keyboard
+                ])
+                // [A6-fix] Remove the duplicate/dead msgId-keyed write. Store under "latest" only.
+                pendingMultiPlans["latest"] = multiPlan
+            } catch {
+                await notify("❌ Multi-plan failed: \(error.localizedDescription)")
+            }
+
+        case "/agents":
+            guard let synth = appState?.subAgentSynthesizer else {
+                await notify("❌ Synthesizer not ready.")
+                return
+            }
+            let agents = (try? await synth.listAgents()) ?? []
+            if agents.isEmpty {
+                await notify("No agent definitions found.\n\nUse `/agents-suggest` to auto-generate from your task history.")
+            } else {
+                let list = agents.map { "• `\($0.name)` — \($0.description)" }.joined(separator: "\n")
+                await notify("*Saved agents (\(agents.count)):*\n\n\(list)\n\nStored in `~/.claude/agents/`")
+            }
+
+        case "/agents-suggest":
+            guard let synth = appState?.subAgentSynthesizer else {
+                await notify("❌ Synthesizer not ready.")
+                return
+            }
+            await notify("🔍 _Analyzing task history for patterns…_")
+            await synth.suggestAgents(lastN: 30)
+            if synth.suggestions.isEmpty {
+                await notify("No recurring patterns found yet. Keep using Shiro and try again after a few more tasks.")
+            } else {
+                var reply = "*Suggested agents (\(synth.suggestions.count)):*\n"
+                for (i, s) in synth.suggestions.enumerated() {
+                    reply += "\n\(i+1). **\(s.name)**\n_\(s.description)_"
+                }
+                reply += "\n\nReply `/agents-save <1|2|3>` to save a suggestion."
+                await notify(reply)
+            }
+
+        case "/agents-save":
+            let idxStr = args.trimmingCharacters(in: .whitespaces)
+            guard let idx = Int(idxStr), idx >= 1,
+                  let synth = appState?.subAgentSynthesizer,
+                  idx <= synth.suggestions.count else {
+                await notify("Usage: `/agents-save <number>` — use after `/agents-suggest`")
+                return
+            }
+            let suggestion = synth.suggestions[idx - 1]
+            do {
+                try await synth.writeAgent(suggestion, scope: .user)
+                await notify("✅ Agent `\(suggestion.name)` saved to `~/.claude/agents/\(suggestion.name).md`")
+            } catch {
+                await notify("❌ Save failed: \(error.localizedDescription)")
+            }
+
+        case "/repos":
+            guard let gh = appState?.gitHubBridge else {
+                await notify("❌ GitHubBridge not ready.")
+                return
+            }
+            await notify("🔍 _Fetching your GitHub repos…_")
+            do {
+                let repos = try await gh.listRepos(limit: 50)
+                if repos.isEmpty { await notify("No repos found."); return }
+                // Format into batches of 20 (Telegram message limit)
+                let lines = repos.map { r in
+                    let priv = r.isPrivate ? "🔒" : "📂"
+                    return "\(priv) `\(r.fullName)`"
+                }
+                // Split into chunks of 20 lines
+                let chunks = stride(from: 0, to: lines.count, by: 20).map {
+                    Array(lines[$0..<min($0 + 20, lines.count)])
+                }
+                for (i, chunk) in chunks.enumerated() {
+                    let header = i == 0 ? "*Your GitHub repos (\(repos.count) total):*\n" : ""
+                    await notify(header + chunk.joined(separator: "\n"))
+                }
+            } catch {
+                await notify("❌ \(error.localizedDescription)")
+            }
+
+        case "/clone":
+            let slug = args.trimmingCharacters(in: .whitespaces)
+            guard !slug.isEmpty else {
+                await notify("Usage: `/clone owner/repo`")
+                return
+            }
+            guard let wsr = appState?.workspacesRegistry else {
+                await notify("❌ WorkspacesRegistry not ready.")
+                return
+            }
+            await notify("⬇️ _Cloning `\(slug)`…_")
+            do {
+                let ws = try await wsr.cloneFromGitHub(slug)
+                await notify("✅ Cloned to `\(ws.path.path)`\n\nUse `/code <task>` to start working on it.")
+            } catch {
+                await notify("❌ Clone failed: \(error.localizedDescription)")
+            }
+
+        default:
+            await notify("Unknown command: `\(cmd)`. Send `/start` for help.")
+        }
+    }
+
+    // MARK: - Text handler with streaming reply
+
+    private func handleIncomingText(_ text: String) async {
+        guard let appState else {
+            await notify("❌ AppState not wired. Contact developer.")
+            return
+        }
+
+        // Send "working" placeholder and capture its message_id for live edits
+        var replyMsgId: Int? = nil
+        do {
+            let resp = try await apiCall(method: "sendMessage", params: [
+                "chat_id":    chatId,
+                "text":       "⏳ _Working…_",
+                "parse_mode": "Markdown"
+            ])
+            if let result = resp["result"] as? [String: Any],
+               let msgId = result["message_id"] as? Int {
+                replyMsgId = msgId
+            }
+        } catch {
+            print("[TelegramRelay] could not send working placeholder: \(error)")
+        }
+
+        let buffer = StreamBuffer()
+        let msgIdCapture = replyMsgId
+
+        activeStreamTask = Task { [weak self] in
+            guard let self else { return }
+
+            var accumulated = ""
+            var lastEdit    = Date.distantPast
+
+            let stream = await appState.runRemotePrompt(text, source: "telegram")
+
+            for await chunk in stream {
+                accumulated += chunk
+                let now = Date()
+                let shouldFlush = accumulated.count - (await buffer.lastFlushedLength) > 80
+                    || now.timeIntervalSince(lastEdit) > 0.5
+
+                if shouldFlush, let msgId = msgIdCapture {
+                    let snap = accumulated
+                    await buffer.setLastFlushedLength(snap.count)
+                    lastEdit = now
+                    _ = try? await self.apiCall(method: "editMessageText", params: [
+                        "chat_id":    self.chatId,
+                        "message_id": msgId,
+                        "text":       snap.count > 4000 ? "…" + String(snap.suffix(3900)) : snap,
+                        "parse_mode": "Markdown"
+                    ])
+                }
+            }
+
+            // Final edit — ensure the complete message is shown
+            if let msgId = msgIdCapture, !accumulated.isEmpty {
+                let finalText = accumulated.count > 4000
+                    ? "…" + String(accumulated.suffix(3900))
+                    : accumulated
+                _ = try? await self.apiCall(method: "editMessageText", params: [
+                    "chat_id":    self.chatId,
+                    "message_id": msgId,
+                    "text":       finalText.isEmpty ? "_(no response)_" : finalText,
+                    "parse_mode": "Markdown"
+                ])
+            }
+        }
+
+        // [B11-fix] Do NOT await activeStreamTask on @MainActor — it would block the poll loop
+        // (preventing /cancel, approval callbacks, etc.) for the entire response duration.
+        // The task cleans itself up when the stream ends.
     }
 
     // MARK: - HTTP
 
+    private func telegramURL(_ method: String) -> URL? {
+        // [C5-fix] Telegram tokens are [0-9]+:[A-Za-z0-9_-]+ — no percent-encoding needed.
+        // Encoding was both unnecessary and potentially mangling colons on some platforms.
+        return URL(string: "https://api.telegram.org/bot\(token)/\(method)")
+    }
+
     private func apiCall(method: String, params: [String: Any]) async throws -> [String: Any] {
-        guard let url = URL(string: "https://api.telegram.org/bot\(token)/\(method)") else {
-            throw TelegramError.invalidURL
-        }
+        guard let url = telegramURL(method) else { throw TelegramError.invalidURL }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 30
-
         request.httpBody = try JSONSerialization.data(withJSONObject: params)
         let (data, response) = try await wsSession.data(for: request)
-
         guard let http = response as? HTTPURLResponse else { throw TelegramError.noResponse }
         guard http.statusCode == 200 else {
             let body = String(data: data, encoding: .utf8) ?? "(empty)"
@@ -263,6 +684,76 @@ Tap a button to decide ↓
         f.dateFormat = "HH:mm:ss"
         return f.string(from: Date())
     }
+}
+
+// MARK: - RemoteReplySink conformance (Phase 2)
+//
+// When messages arrive via RemoteInbox, chunks are delivered here instead of
+// being driven directly by handleIncomingText. Both paths still work — direct
+// path is used when TelegramRelay handles messages itself (backward compat).
+
+extension TelegramRelay: RemoteReplySink {
+
+    // [B5-fix] streamChunk now does live editing for the RemoteInbox path.
+    func streamChunk(_ text: String, replyToken: String?) async {
+        guard let token = replyToken, let msgId = Int(token) else { return }
+        chunkAccumulators[token, default: ""] += text
+        let now        = Date()
+        let lastEdit   = lastChunkEditDates[token] ?? Date.distantPast
+        let accumulated = chunkAccumulators[token]!
+        // Rate-limit edits: no more than once per 500ms (Telegram limit is ~1/s per chat).
+        guard now.timeIntervalSince(lastEdit) >= 0.5 else { return }
+        lastChunkEditDates[token] = now
+        let display = accumulated.count > 4000 ? "…" + String(accumulated.suffix(3900)) : accumulated
+        _ = try? await apiCall(method: "editMessageText", params: [
+            "chat_id":    chatId,
+            "message_id": msgId,
+            "text":       display,
+            "parse_mode": "Markdown"
+        ])
+    }
+
+    func streamFinished(replyToken: String?, finalText: String) async {
+        // Clean up streaming state for this token.
+        if let token = replyToken {
+            chunkAccumulators.removeValue(forKey: token)
+            lastChunkEditDates.removeValue(forKey: token)
+        }
+        guard let token = replyToken, let msgId = Int(token) else {
+            await notify(finalText.isEmpty ? "_(no response)_" : finalText)
+            return
+        }
+        let text = finalText.count > 4000
+            ? "…" + String(finalText.suffix(3900))
+            : finalText
+        _ = try? await apiCall(method: "editMessageText", params: [
+            "chat_id":    chatId,
+            "message_id": msgId,
+            "text":       text.isEmpty ? "_(no response)_" : text,
+            "parse_mode": "Markdown"
+        ])
+    }
+
+    func streamError(_ message: String, replyToken: String?) async {
+        if let token = replyToken, let msgId = Int(token) {
+            _ = try? await apiCall(method: "editMessageText", params: [
+                "chat_id":    chatId,
+                "message_id": msgId,
+                "text":       message,
+                "parse_mode": "Markdown"
+            ])
+        } else {
+            await notify(message)
+        }
+    }
+}
+
+// MARK: - Stream buffer (tracks flush position, thread-safe via actor)
+
+private actor StreamBuffer {
+    private var _lastFlushedLength: Int = 0
+    var lastFlushedLength: Int { _lastFlushedLength }
+    func setLastFlushedLength(_ n: Int) { _lastFlushedLength = n }
 }
 
 // MARK: - Errors

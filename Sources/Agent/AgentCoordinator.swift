@@ -93,6 +93,9 @@ final class AgentCoordinator: ObservableObject {
     @Published var streamingText: String = ""
     @Published var pendingApprovals: [ApprovalRequest] = []
 
+    // 120-second safety timeout task — cancelled on turn completion or error.
+    private var safetyTimeoutTask: Task<Void, Never>? = nil
+
     var onStatusUpdate: ((String) -> Void)?
     var onStreamingToken: ((String) -> Void)?
     var onTurnComplete: ((String) -> Void)?
@@ -146,6 +149,9 @@ final class AgentCoordinator: ObservableObject {
     }
 
     private func handleBridgeEvent(_ event: BridgeEvent) {
+        // Push tool events to the UI feed (AppState) — updates Tool Feed panel + inline chips.
+        Task { @MainActor in AppState.shared.handleBridgeEventForUI(event) }
+
         switch event {
 
         case .sessionReady(_, _):
@@ -161,11 +167,14 @@ final class AgentCoordinator: ObservableObject {
         case .toolStarted(_, _, let name, _):
             isRunning = true
             onStatusUpdate?("Using \(name)…")
+            Task { @MainActor in AppState.shared.agentStatus = .acting(tool: name) }
 
         case .toolFinished:
             break
 
         case .turnComplete(_, let text, let inTok, let outTok, let cost):
+            safetyTimeoutTask?.cancel()
+            safetyTimeoutTask = nil
             isRunning  = false
             streamingText = ""
             onStatusUpdate?("Done  (\(inTok)→\(outTok) tok, $\(String(format: "%.4f", cost)))")
@@ -183,7 +192,10 @@ final class AgentCoordinator: ObservableObject {
             pendingApprovals.append(req)
 
         case .bridgeError(_, let msg):
+            safetyTimeoutTask?.cancel()
+            safetyTimeoutTask = nil
             isRunning = false
+            AppState.shared.isProcessing = false
             onStatusUpdate?("Error: \(msg)")
 
         case .bridgeLog(let level, let msg):
@@ -204,6 +216,18 @@ final class AgentCoordinator: ObservableObject {
             currentTaskTitle = String(prompt.prefix(60))
             b.query(prompt, sessionKey: sessionKey, systemPrompt: systemPrompt,
                     cwd: nil, mode: mode, model: nil, resume: nil)
+
+            // 120-second safety timeout in case turnComplete never fires.
+            safetyTimeoutTask?.cancel()
+            safetyTimeoutTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 120_000_000_000)
+                guard let self = self, !Task.isCancelled else { return }
+                if self.isRunning {
+                    self.isRunning = false
+                    AppState.shared.isProcessing = false
+                }
+            }
+
             // Result arrives asynchronously via handleBridgeEvent(.turnComplete).
             // Callers who need the final text should observe `onTurnComplete`.
             return ""
@@ -244,12 +268,18 @@ final class AgentCoordinator: ObservableObject {
             onStatusUpdate?("Thinking… (step \(iterationCount))")
 
             let model = ModelRouter.route(prompt: query, tools: AgentCoordinator.coreTools)
-            let response = try await lmStudio.chat(
-                messages: messages,
-                model: model,
-                tools: AgentCoordinator.coreTools,
-                maxTokens: 2048
-            )
+            let response: ChatCompletionResponse
+            do {
+                response = try await lmStudio.chat(
+                    messages: messages,
+                    model: model,
+                    tools: AgentCoordinator.coreTools,
+                    maxTokens: 2048
+                )
+            } catch {
+                isRunning = false
+                throw error
+            }
 
             guard let choice = response.choices.first else { break }
             let message = choice.message

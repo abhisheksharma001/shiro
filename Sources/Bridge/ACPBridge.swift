@@ -147,14 +147,20 @@ struct AnyCodableLeaf: Decodable {
 
 // MARK: - Consent Gate
 
-enum ToolRisk: String {
+enum ToolRisk: String, Comparable {
     case low, med, high
 
     /// Consent Gate policy:
     /// low  → auto-approve silently
-    /// med  → toast with 3-second veto window (not yet implemented — auto-approve for MVP)
+    /// med  → toast with 3-second veto window
     /// high → blocking ApprovalCard
     var requiresExplicitApproval: Bool { self == .high }
+
+    // Comparable conformance: low < med < high
+    private var order: Int {
+        switch self { case .low: return 0; case .med: return 1; case .high: return 2 }
+    }
+    static func < (lhs: ToolRisk, rhs: ToolRisk) -> Bool { lhs.order < rhs.order }
 }
 
 // MARK: - ACPBridge Events (published to AgentCoordinator / UI)
@@ -300,6 +306,9 @@ final class ACPBridge: BridgeRouter {
 
     func stop() {
         send(.stop)
+        // Cancel readability handlers before terminating to avoid spurious callbacks.
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             self?.process?.terminate()
         }
@@ -356,6 +365,11 @@ final class ACPBridge: BridgeRouter {
 
     private func appendStdout(_ data: Data) {
         stdoutBuffer.append(data)
+        // Cap buffer at 4 MB; drop oldest 2 MB to prevent unbounded growth.
+        if stdoutBuffer.count > 4 * 1024 * 1024 {
+            print("[ACPBridge] ⚠️  stdout buffer overflow — dropping oldest 2MB")
+            stdoutBuffer.removeSubrange(stdoutBuffer.startIndex ..< stdoutBuffer.index(stdoutBuffer.startIndex, offsetBy: 2 * 1024 * 1024))
+        }
         while let nlRange = stdoutBuffer.firstRange(of: Data([0x0A])) {
             let lineData = Data(stdoutBuffer[stdoutBuffer.startIndex..<nlRange.lowerBound])
             stdoutBuffer.removeSubrange(stdoutBuffer.startIndex..<nlRange.upperBound)
@@ -409,7 +423,7 @@ final class ACPBridge: BridgeRouter {
                         risk:          risk
                     )
                     switch decision {
-                    case .approved:
+                    case .approved, .rememberAllow:
                         await self.executeToolAndReply(callId: callId, sessionKey: sk, name: name, input: input)
                     case .denied, .rememberDeny:
                         let denialReason: String?
@@ -760,11 +774,18 @@ final class ACPBridge: BridgeRouter {
             let raw   = try String(contentsOfFile: expanded, encoding: .utf8)
             let lines = raw.components(separatedBy: "\n")
             let from  = max(0, (offset ?? 1) - 1)
-            let to    = min(lines.count, from + (limit ?? 2000))
             guard from < lines.count else {
-                return ToolResult(text: "(offset beyond file end)", isError: false)
+                return ToolResult(
+                    text: "Error: offset \(from + 1) exceeds file length (\(lines.count) lines)",
+                    isError: true
+                )
             }
-            return ToolResult(text: lines[from..<to].joined(separator: "\n"), isError: false)
+            let to = min(lines.count, from + (limit ?? 2000))
+            var result = lines[from..<to].joined(separator: "\n")
+            if to < lines.count {
+                result += "\n… (\(lines.count - to) more lines)"
+            }
+            return ToolResult(text: result, isError: false)
         } catch {
             return ToolResult(text: "Error reading \(expanded): \(error.localizedDescription)", isError: true)
         }
@@ -904,6 +925,12 @@ final class ACPBridge: BridgeRouter {
         // OpenAI-compatible override (any OAI-API provider)
         if let k = Config.openAIAPIKey, !k.isEmpty { env["OPENAI_API_KEY"] = k }
         if let u = Config.openAIBaseURL, !u.isEmpty { env["OPENAI_BASE_URL"] = u }
+
+        // MCP integration credentials — read from Keychain and forwarded to
+        // child MCP servers (composio, github, huggingface) via env vars.
+        if let k = KeychainHelper.get(.composioAPIKey),    !k.isEmpty { env["COMPOSIO_API_KEY"]              = k }
+        if let k = KeychainHelper.get(.githubToken),       !k.isEmpty { env["GITHUB_PERSONAL_ACCESS_TOKEN"]  = k }
+        if let k = KeychainHelper.get(.huggingFaceToken),  !k.isEmpty { env["HF_TOKEN"]                      = k }
 
         return env
     }

@@ -81,7 +81,12 @@ enum Config {
         do {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         } catch {
-            // Last resort: temp dir. Keeps the app bootable so the error surfaces in a log.
+            // [C11-fix] Log the error prominently — silently falling back to tmp means
+            // all user data (conversations, approvals, cost records) is ephemeral and
+            // gets wiped by macOS on the next cleanup. Better to surface this immediately.
+            print("⚠️ [Shiro] CRITICAL: Cannot create DB directory at \(dir.path) — \(error.localizedDescription)")
+            print("⚠️ [Shiro] Check ~/Library/Application Support permissions. Falling back to tmp (NOT persistent).")
+            // Still fall back so the app stays bootable; bridge will show .offline status.
             let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("Shiro", isDirectory: true)
             try? fm.createDirectory(at: tmp, withIntermediateDirectories: true)
@@ -93,6 +98,23 @@ enum Config {
     // MARK: - Consent
     /// Seconds to wait for a high-risk tool approval before auto-denying.
     static let approvalTimeoutSeconds: TimeInterval = 300  // 5 min
+
+    /// When true, medium-risk tools prompt the user (same as high).
+    /// When false (default), medium-risk tools are auto-approved silently.
+    static var askBeforeMediumRisk: Bool {
+        get { UserDefaults.standard.object(forKey: "shiro.askMediumRisk") == nil
+            ? false
+            : UserDefaults.standard.bool(forKey: "shiro.askMediumRisk") }
+        set { UserDefaults.standard.set(newValue, forKey: "shiro.askMediumRisk") }
+    }
+
+    /// When askBeforeMediumRisk is false, show a 3-second veto toast for medium-risk actions.
+    static var showMediumRiskVetoToast: Bool {
+        get { UserDefaults.standard.object(forKey: "shiro.mediumRiskVeto") == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: "shiro.mediumRiskVeto") }
+        set { UserDefaults.standard.set(newValue, forKey: "shiro.mediumRiskVeto") }
+    }
 
     // MARK: - Screen Capture
     static let screenCaptureInterval: TimeInterval = 30  // seconds between screen analyses
@@ -158,6 +180,18 @@ enum Config {
         UserDefaults.standard.set(mode.rawValue, forKey: "shiro.routeMode")
     }
 
+    // MARK: - Active model override (for /model Telegram command)
+
+    /// Optional model override set by the Telegram /model command.
+    /// nil = use backend default.
+    static var activeModel: String? {
+        UserDefaults.standard.string(forKey: "shiro.activeModel")
+    }
+
+    static func setActiveModel(_ model: String) {
+        UserDefaults.standard.set(model, forKey: "shiro.activeModel")
+    }
+
     /// Absolute path to the `claude` CLI binary if installed, else nil.
     /// Searched in order: $SHIRO_CLAUDE_PATH → ~/.local/bin → ~/.claude/local → /opt/homebrew/bin → /usr/local/bin → PATH.
     static var claudeCodeCLIPath: String? {
@@ -193,7 +227,11 @@ enum Config {
                 (String($0) as NSString).expandingTildeInPath
             }
         }
-        return [NSHomeDirectory()]
+        // [C3-fix] Default to ~/Projects only, not the entire $HOME.
+        // Full home access exposes ~/.ssh, ~/.aws, ~/Documents etc. to the subprocess.
+        // The user can grant more in Settings → Route → "Grant full ~/ access".
+        let projectsDir = (NSHomeDirectory() as NSString).appendingPathComponent("Projects")
+        return [projectsDir]
     }
 
     static func setAllowedDirectories(_ dirs: [String]) {
