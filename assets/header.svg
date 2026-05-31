@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="180" viewBox="0 0 900 180" fill="none" role="img" aria-label="Shiro — local-first autonomous macOS AI agent">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a0e14"/>
+      <stop offset="1" stop-color="#11151c"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.78" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#3b5bdb" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#3b5bdb" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="title" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#cbd5e1"/>
+    </linearGradient>
+  </defs>
+  <rect width="900" height="180" rx="14" fill="url(#bg)"/>
+  <rect width="900" height="180" rx="14" fill="url(#glow)">
+    <animate attributeName="opacity" values="0.6;1;0.6" dur="7s" repeatCount="indefinite"/>
+  </rect>
+
+  <text x="60" y="70" font-family="'Segoe UI',Helvetica,Arial,sans-serif" font-size="52" font-weight="800" fill="url(#title)">Shiro <tspan font-size="30" font-weight="500" fill="#94a3b8">白</tspan></text>
+  <text x="62" y="104" font-family="'SFMono-Regular',ui-monospace,Menlo,Consolas,monospace" font-size="15" fill="#7d8da3">local-first autonomous <tspan fill="#818cf8">macOS AI agent</tspan></text>
+  <text x="62" y="134" font-family="'SFMono-Regular',ui-monospace,Menlo,Consolas,monospace" font-size="12.5" fill="#5b6675">SwiftUI · bring-your-own-model · sqlite-vec memory · MCP</text>
+
+  <!-- orbiting agent nodes around a core -->
+  <g transform="translate(760,90)">
+    <circle r="40" fill="none" stroke="#1e293b" stroke-width="1"/>
+    <circle r="26" fill="none" stroke="#1e293b" stroke-width="1"/>
+    <circle r="9" fill="#818cf8">
+      <animate attributeName="opacity" values="0.7;1;0.7" dur="2.5s" repeatCount="indefinite"/>
+    </circle>
+    <g>
+      <circle cx="40" cy="0" r="4" fill="#5eead4"/>
+      <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="9s" repeatCount="indefinite"/>
+    </g>
+    <g>
+      <circle cx="26" cy="0" r="3.2" fill="#38bdf8"/>
+      <animateTransform attributeName="transform" type="rotate" from="180" to="540" dur="6s" repeatCount="indefinite"/>
+    </g>
+    <g>
+      <circle cx="-40" cy="0" r="3.2" fill="#a78bfa"/>
+      <animateTransform attributeName="transform" type="rotate" from="90" to="450" dur="11s" repeatCount="indefinite"/>
+    </g>
+  </g>
+</svg>
