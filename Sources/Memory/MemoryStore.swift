@@ -56,6 +56,10 @@ final class MemoryStore {
         let texts = chunks.map(\.content)
         let vectors = try await embeddings.embedBatch(texts)
 
+        guard vectors.count == chunks.count else {
+            throw MemoryStoreError.embeddingCountMismatch(expected: chunks.count, got: vectors.count)
+        }
+
         try await db.pool.write { db in
             for (i, chunk) in chunks.enumerated() {
                 try db.execute(
@@ -277,6 +281,18 @@ final class MemoryStore {
             }
         if tokens.isEmpty { return "\"\(raw.replacingOccurrences(of: "\"", with: ""))\"" }
         return tokens.joined(separator: " ")
+    }
+}
+
+// MARK: - MemoryStoreError
+
+enum MemoryStoreError: LocalizedError {
+    case embeddingCountMismatch(expected: Int, got: Int)
+    var errorDescription: String? {
+        switch self {
+        case .embeddingCountMismatch(let e, let g):
+            return "Embedding batch returned \(g) vectors for \(e) chunks"
+        }
     }
 }
 

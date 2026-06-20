@@ -26,6 +26,9 @@ final class ClaudeCodeRouter: BridgeRouter {
     private(set) var isRunning: Bool = false
     var routeLabel: String { "Claude Code CLI (subscription)" }
 
+    // [B2/B3-fix] Accept skillsRegistry reference so the router can surface skill prompts.
+    var skillsRegistry: SkillsRegistry?
+
     // MARK: - Internals
 
     private var process: Process?
@@ -36,6 +39,12 @@ final class ClaudeCodeRouter: BridgeRouter {
 
     private var currentSessionId: String = ""
     private var streamingText: [String: String] = [:]   // sessionKey → accumulated text
+
+    // Turn timeout tasks — keyed by sessionKey; cancelled on result/error.
+    private var activeTurnTasks: [String: Task<Void, Never>] = [:]
+    // Buffered query waiting for the bridge to come up.
+    private var pendingQuery: (prompt: String, sessionKey: String, systemPrompt: String?,
+                               cwd: String?, mode: String, model: String?, resume: String?)? = nil
 
     // MARK: - Launch
 
@@ -68,6 +77,11 @@ final class ClaudeCodeRouter: BridgeRouter {
         var env = ProcessInfo.processInfo.environment
         env.removeValue(forKey: "ANTHROPIC_API_KEY")     // use subscription, not API key
         env.removeValue(forKey: "ANTHROPIC_BASE_URL")
+        // MCP integration credentials (Composio, GitHub, HuggingFace) — pulled
+        // from Keychain and exposed to child MCP servers spawned by the CLI.
+        if let k = KeychainHelper.get(.composioAPIKey),    !k.isEmpty { env["COMPOSIO_API_KEY"]              = k }
+        if let k = KeychainHelper.get(.githubToken),       !k.isEmpty { env["GITHUB_PERSONAL_ACCESS_TOKEN"]  = k }
+        if let k = KeychainHelper.get(.huggingFaceToken),  !k.isEmpty { env["HF_TOKEN"]                      = k }
         proc.environment = env
 
         let stdin = Pipe(); let stdout = Pipe(); let stderr = Pipe()
@@ -125,10 +139,35 @@ final class ClaudeCodeRouter: BridgeRouter {
                model: String? = nil,
                resume: String? = nil) {
         guard let handle = stdinPipe?.fileHandleForWriting, isRunning else {
-            onEvent?(.bridgeError(sessionKey: sessionKey, message: "claude CLI not running"))
+            // Buffer and retry after 3 seconds.
+            pendingQuery = (prompt: prompt, sessionKey: sessionKey, systemPrompt: systemPrompt,
+                            cwd: cwd, mode: mode, model: model, resume: resume)
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard let self = self else { return }
+                if self.isRunning, let pq = self.pendingQuery {
+                    self.pendingQuery = nil
+                    self.query(pq.prompt, sessionKey: pq.sessionKey, systemPrompt: pq.systemPrompt,
+                               cwd: pq.cwd, mode: pq.mode, model: pq.model, resume: pq.resume)
+                } else if let pq = self.pendingQuery {
+                    self.pendingQuery = nil
+                    self.onEvent?(.bridgeError(sessionKey: pq.sessionKey,
+                                               message: "claude CLI not running after retry"))
+                }
+            }
             return
         }
         streamingText[sessionKey] = ""
+
+        // Start 90-second turn timeout.
+        activeTurnTasks[sessionKey]?.cancel()
+        let sk = sessionKey
+        activeTurnTasks[sk] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 90_000_000_000)
+            guard let self = self, !Task.isCancelled else { return }
+            self.activeTurnTasks.removeValue(forKey: sk)
+            self.onEvent?(.bridgeError(sessionKey: sk, message: "turn timeout after 90s"))
+        }
 
         // stream-json input line:
         //   {"type":"user","message":{"role":"user","content":"<prompt>"}}
@@ -273,6 +312,8 @@ final class ClaudeCodeRouter: BridgeRouter {
             }
 
         case "result":
+            // Cancel the turn timeout.
+            activeTurnTasks.removeValue(forKey: sk)?.cancel()
             let finalText = (obj["result"] as? String)
                 ?? streamingText[sk]
                 ?? ""
@@ -288,13 +329,17 @@ final class ClaudeCodeRouter: BridgeRouter {
             ))
 
         case "error":
+            // Cancel the turn timeout.
+            activeTurnTasks.removeValue(forKey: sk)?.cancel()
             let msg = (obj["message"] as? String) ?? "unknown error"
             onEvent?(.bridgeError(sessionKey: sk, message: msg))
 
         default:
+            // Silently ignore well-known informational event types that carry no message.
             if let msg = obj["message"] as? String {
                 onEvent?(.bridgeLog(level: "info", message: "\(type): \(msg)"))
             }
+            // If no "message" key — just return silently (e.g. rate_limit_event, hook events).
         }
     }
 

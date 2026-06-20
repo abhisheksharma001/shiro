@@ -165,7 +165,7 @@ struct MeetingModeView: View {
                 .buttonStyle(.plain)
             }
             Markdown(text)
-                .markdownTheme(.shiro(textColor: textC))
+                .markdownTheme(.shiroTheme)
                 .font(.system(size: 11))
         }
         .padding(12)

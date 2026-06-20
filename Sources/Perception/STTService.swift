@@ -251,7 +251,10 @@ final class STTService: NSObject, ObservableObject {
         guard let engine = audioEngine else { return }
 
         let inputNode = engine.inputNode
-        let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true) else {
+            print("[STT] Error: could not create AVAudioFormat — audioFormatUnavailable")
+            return
+        }
 
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
             guard let channelData = buffer.int16ChannelData else { return }
@@ -269,10 +272,12 @@ final class STTService: NSObject, ObservableObject {
 
     private func recordAudio(duration: TimeInterval) async throws -> Data {
         try await requestMicPermission()
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true) else {
+            throw STTError.audioFormatUnavailable
+        }
         return try await withCheckedThrowingContinuation { continuation in
             var recorded = Data()
             let engine = AVAudioEngine()
-            let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
 
             engine.inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
                 guard let channelData = buffer.int16ChannelData else { return }
@@ -413,13 +418,15 @@ enum STTError: LocalizedError {
     case httpError(Int)
     case noTranscript
     case micPermissionDenied
+    case audioFormatUnavailable
 
     var errorDescription: String? {
         switch self {
-        case .invalidURL:           return "STT: invalid URL"
-        case .httpError(let code):  return "STT: HTTP \(code)"
-        case .noTranscript:         return "STT: empty transcript"
-        case .micPermissionDenied:  return "Microphone access was denied. Grant access in System Settings → Privacy & Security → Microphone."
+        case .invalidURL:             return "STT: invalid URL"
+        case .httpError(let code):    return "STT: HTTP \(code)"
+        case .noTranscript:           return "STT: empty transcript"
+        case .micPermissionDenied:    return "Microphone access was denied. Grant access in System Settings → Privacy & Security → Microphone."
+        case .audioFormatUnavailable: return "STT: AVAudioFormat could not be created for 16kHz mono PCM"
         }
     }
 }

@@ -10,12 +10,20 @@ enum KeychainHelper {
     // MARK: - Known keys
 
     enum Key: String {
-        case anthropicAPIKey  = "anthropic_api_key"
-        case openAIAPIKey     = "openai_api_key"
-        case openAIBaseURL    = "openai_base_url"
-        case deepgramAPIKey   = "deepgram_api_key"
-        case telegramBotToken = "telegram_bot_token"
-        case telegramChatId   = "telegram_chat_id"
+        case anthropicAPIKey   = "anthropic_api_key"
+        case openAIAPIKey      = "openai_api_key"
+        case openAIBaseURL     = "openai_base_url"
+        case deepgramAPIKey    = "deepgram_api_key"
+        case telegramBotToken  = "telegram_bot_token"
+        case telegramChatId    = "telegram_chat_id"
+        // MCP integration credentials — injected into the bridge subprocess env.
+        case composioAPIKey    = "composio_api_key"
+        case githubToken       = "github_personal_access_token"
+        case huggingFaceToken  = "huggingface_token"
+        // PageGrid — AI documentation search service
+        case pagegridAPIKey    = "pagegrid_api_key"
+        // HTTP remote server bearer token (Phase 6)
+        case shiroRemoteToken  = "shiro_remote_token"
     }
 
     // MARK: - Read / Write / Delete

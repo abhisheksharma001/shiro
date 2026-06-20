@@ -1,56 +1,58 @@
-## Session: 2026-04-18
+# HANDOFF — 2026-05-01 (All phases complete)
+
+## Session: 2026-05-01
 
 ## What Was Done
-All 7 planned phases built and compiling clean (Swift + TypeScript).
+All 10 phases of BUILD-PLAN.md executed. App builds clean (0 errors, warnings only).
 
-- **Phase 3 — Vector RAG**: `EmbeddingService.swift` (LRU-cached batch embed), `MemoryStore.swift` (vDSP cosine + FTS5 RRF fusion), `Ingestor.swift` (code/markdown/text chunking, mtime-gated). DB v3 migration adds `memory_chunks` + `ingest_jobs` + FTS5 virtual table. `search_memory` tool in ACPBridge wired to real results. Auto-ingest `~/Projects` on launch.
-- **Phase 2.5 — Telegram relay**: `TelegramRelay.swift` — long-poll bot, sends approval cards with inline keyboard (✅/❌/🚫), edits message after decision. `ConsentGate` fires relay in parallel on high-risk suspensions. Audit log records `"telegram"` vs `"ui"` channel. Enabled via `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` env vars.
-- **Phase 4 — MCP registry**: `~/.shiro/mcp.json` auto-created with GitHub/Context7/Filesystem/Composio/HuggingFace. `mcp-registry.ts` (Node) expands `${VAR}` and merges external servers into every `query()` call alongside built-in shiro server. `MCPRegistry.swift` surfaces list in SettingsView with live enable/disable toggles.
-- **Phase 5 — Skills system**: `SkillsRegistry.swift` + `~/.shiro/skills/*.json`. 6 built-in skills: `research`, `summarise-meeting`, `code-review` (`/review`), `draft-email` (`/email`), `daily-brief` (`/brief`), `ingest`. Slash command routing in FloatingBarView (user types `/research topic` → skill's system prompt + filled template sent). `invoke_skill` tool lets agent call skills. Badge shown on user bubble.
-- **Phase 6 — Hooks engine**: `HooksEngine.swift` — `app_launch`, `file_watch` (DispatchSource), `schedule` (daily HH:MM or every:N minutes). Default hooks: watch `COLLABORATION.md`, daily-brief at 09:00 (disabled), ingest-on-launch (disabled). Config: `~/.shiro/hooks.json`.
-- **Phase 7 — Meeting mode UI**: `MeetingModeView.swift` — pulsing amber REC dot, live transcript with HH:MM:SS timestamps, per-segment green flash, auto-summary card (calls `summarise-meeting` skill on STT flush), mute toggle, End Meeting → saves `MeetingSession` to DB + triggers full summarise. Waveform button in main bar toggles mode.
+- **Phase 0**: ConsentGate policies UI + audit viewer (Settings tabs 6/7)
+- **Phase 1**: TelegramRelay bidirectional with slash commands, streaming via StreamBuffer
+- **Phase 2**: RemoteInbox actor (dedup, serial, RemoteReplySink protocol)
+- **Phase 3**: WorkspacesRegistry (scan ~/Projects, fuzzy resolve, persist)
+- **Phase 4**: ClaudeCodeRunner actor (JSONL stream, budget enforcement)
+- **Phase 5**: GitHubBridge actor (gh CLI wrapper: listRepos, clone, createPR)
+- **Phase 6**: HTTPRemoteServer (NWListener 7421, Bearer auth, sync/async, Settings tab 8)
+- **Phase 7**: CodingOrchestrator + MultiCodingPlan (worktree, VS Code, parallel subtasks)
+- **Phase 8**: CostLedger + Budget tab (tab 9) — today/month spend, ceiling slider, top-10 table
+- **Phase 9**: Polish — ⌘K palette, veto toast, approval countdown, risk-tier toggle, workspace presets
 
 ## What Works
-- `swift build` → Build complete (verified 2026-04-18)
-- `cd acp-bridge && npm run build` → clean tsc compile (verified 2026-04-18)
-- Full init chain in `AppState.initialize()`: DB → LMStudio → KG → STT → Screen → Coordinator → ConsentGate → SubAgentManager → TelegramRelay → ACP Bridge → MCPRegistry → SkillsRegistry → HooksEngine → EmbeddingService → MemoryStore → Ingestor
+- `swift build` → Build complete (0 errors)
+- Settings has 10 tabs: Status, Route, API Keys, MCP, Layout, Error Log, Policies, Audit, Remote, Budget
+- ⌘K opens command palette with skills + slash commands + recent prompts (fuzzy, arrow keys)
+- Approval cards show live "Auto-deny in M:SS" countdown
+- Medium-risk 3-second veto toast configurable in Policies tab
+- Workspace presets loaded from `.shiro/workspace.toml` per project (model, tools, cost, risk)
 
 ## What's Broken / Blockers
-- **Not runtime-tested** — no LM Studio running in CI. All builds are compile-only verified.
-- `acp-bridge/dist/` must exist before Swift launches the bridge: run `cd acp-bridge && npm run build` first.
-- Telegram long-poll uses `URLSession.shared` — works but not cancellable mid-request on app quit. Low priority.
-- `Ingestor.swift:96` has a Swift 6 warning (`makeIterator` async context) — not an error, safe to ignore for now.
+- Voice approval (9.2) not implemented — requires STT + ApprovalCardView integration
+- `autoApproveRisk` from WorkspacePreset parsed but not consumed by ConsentGate
+- No Xcode project — build/run via `swift build` CLI only
 
 ## Next Steps (Priority Order)
-1. **Run end-to-end**: Launch LM Studio with all 4 models → `npm run build` in acp-bridge → `swift run` → type a message → confirm streaming works
-2. **Set env vars for Telegram**: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` in Xcode scheme → test approval card flow with a `shell_exec` command
-3. **Enable GitHub MCP**: Set `GITHUB_PERSONAL_ACCESS_TOKEN` env var → toggle `github` server on in Settings → restart
-4. **Test `/research` skill**: Type `/research Swift concurrency` in the bar → confirm skill badge appears + correct system prompt used
-5. **Test meeting mode**: Click waveform button → speak → confirm transcript lines appear → click "Summarise" → confirm skill fires
-6. **COLLABORATION.md hook**: Shiromi writes to `~/Projects/shiro/COLLABORATION.md` → confirm hook fires and agent receives the query
+1. Voice approval (9.2): wire STTService to ApprovalCardView, listen for "approve"/"deny"
+2. Wire `preset.autoApproveRisk` into ACPBridge → ConsentGate.evaluate() call site
+3. Auto-trigger SubAgentSynthesizer.suggestAgents() after every N tasks
+4. Full end-to-end test: Telegram token set → `/code fix the tests` → VS Code opens → Claude runs → PR created
 
 ## Files Modified (this session)
-- `Sources/Memory/Database.swift` — v3 migration, `MemoryChunk` + `IngestJob` records
-- `Sources/Memory/EmbeddingService.swift` — NEW
-- `Sources/Memory/MemoryStore.swift` — NEW (vDSP cosine + FTS5 RRF)
-- `Sources/Memory/Ingestor.swift` — NEW
-- `Sources/Memory/MCPRegistry.swift` — NEW
-- `Sources/Bridge/TelegramRelay.swift` — NEW
-- `Sources/Bridge/ACPBridge.swift` — added `memoryStore`, `skillsRegistry`, `search_memory` + `invoke_skill` tools, `searchMemoryTool()`
-- `Sources/Agent/ConsentGate.swift` — `telegramRelay` ref, parallel Telegram notify, channel audit, `resolve()` channel param
-- `Sources/Agent/SkillsRegistry.swift` — NEW
-- `Sources/Agent/HooksEngine.swift` — NEW
-- `Sources/App/AppState.swift` — all new services wired
-- `Sources/App/Config.swift` — Telegram + MCP config keys
-- `Sources/UI/FloatingBar/FloatingBarView.swift` — slash routing, meeting button, badge, MCP settings section
-- `Sources/UI/FloatingBar/MeetingModeView.swift` — NEW
-- `acp-bridge/src/mcp-registry.ts` — NEW
-- `acp-bridge/src/index.ts` — external MCP servers merged into runQuery()
+- Sources/Agent/CostLedger.swift (new)
+- Sources/Memory/Database.swift
+- Sources/Agent/CodingOrchestrator.swift
+- Sources/App/AppState.swift
+- Sources/UI/FloatingBar/FloatingBarView.swift (Budget tab + ⌘K palette + risk-tier toggle)
+- Sources/UI/FloatingBar/ApprovalCardView.swift (countdown + veto toast)
+- Sources/Agent/ConsentGate.swift (medium-risk veto path, awaitUserApproval extracted)
+- Sources/App/Config.swift (askBeforeMediumRisk, showMediumRiskVetoToast)
+- Sources/Agent/Workspaces.swift (WorkspacePreset TOML parser)
 
 ## Must-Know Context
-- Node bridge path is hardcoded to `/Users/abhisheksharma/Projects/shiro/acp-bridge/dist/index.js` — override with `SHIRO_BRIDGE_PATH` env var
-- Node binary hardcoded to `/Users/abhisheksharma/node-v20.12.2-darwin-arm64/bin/node` — override with `SHIRO_NODE_PATH`
-- Embedding model: `text-embedding-embeddinggemma-300m-qat` (768-dim) — must be loaded in LM Studio
-- DB file: `~/Library/Application Support/Shiro/shiro.db` — delete to reset all state
-- Config files live in `~/.shiro/`: `mcp.json`, `hooks.json`, `skills/*.json` — all auto-created on first run
-- `COLLABORATION.md` at `~/Projects/shiro/COLLABORATION.md` — Shiromi writes here, HooksEngine watches it
+- Build: `cd ~/Projects/shiro && swift build`
+- Run: `cd ~/Projects/shiro && .build/debug/Shiro`
+- Kill: `pkill -f "\.build/debug/Shiro"`
+- Branch: `claude/forecast-composio-warmth-redesign` (11 commits ahead of origin)
+- GRDB migrations v1–v4; DB at ~/.shiro/shiro.db
+- Remote server binds to 127.0.0.1:7421 — Tailscale needed for phone access
+- CodingOrchestrator requires `code` CLI at /usr/local/bin/code
+- TaskGroup in executeMulti pre-resolves worktrees on MainActor before concurrent section
+- Palette: bg=#1A1916, accent=#D97757 (Claude copper), text=#F2EDE5
