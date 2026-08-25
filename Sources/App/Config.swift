@@ -117,6 +117,25 @@ enum Config {
         return !t.isEmpty && !c.isEmpty
     }
 
+    // MARK: - Hooks
+    /// COLLABORATION.md watched by the default `watch-collaboration` hook.
+    /// Tilde-relative paths are expanded at fire time.
+    /// Override with SHIRO_COLLABORATION_PATH env var.
+    static var collaborationDocPath: String {
+        ProcessInfo.processInfo.environment["SHIRO_COLLABORATION_PATH"]
+            ?? "~/Projects/shiro/COLLABORATION.md"
+    }
+    /// Directory re-indexed by the default `ingest-on-launch` hook.
+    /// Defaults to the folder containing collaborationDocPath.
+    /// Override with SHIRO_PROJECT_ROOT env var.
+    static var projectRoot: String {
+        if let env = ProcessInfo.processInfo.environment["SHIRO_PROJECT_ROOT"], !env.isEmpty {
+            return env
+        }
+        return URL(fileURLWithPath: collaborationDocPath)
+            .deletingLastPathComponent().path
+    }
+
     // MARK: - Meeting Mode
     static let meetingTranscriptFlushInterval: TimeInterval = 120  // summarize every 2 min
     static let stuckScreenThreshold: TimeInterval = 300            // 5 min = stuck

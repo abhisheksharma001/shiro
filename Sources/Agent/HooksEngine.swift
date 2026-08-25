@@ -361,7 +361,7 @@ final class HooksEngine: ObservableObject {
     private func writeDefaultsIfNeeded() {
         guard !FileManager.default.fileExists(atPath: Self.configURL.path) else { return }
 
-        let collabPath = "~/Projects/shiro/COLLABORATION.md"
+        let collabPath = Config.collaborationDocPath
         let defaults = HooksFile(hooks: [
             Hook(
                 name: "daily-brief",
@@ -390,9 +390,9 @@ final class HooksEngine: ObservableObject {
                 path: nil,
                 schedule: nil,
                 action: HookAction(type: "ingest", skill: nil, args: nil,
-                                   query: nil, path: "~/Projects/shiro", corpus: "code"),
+                                   query: nil, path: Config.projectRoot, corpus: "code"),
                 enabled: false,
-                description: "Re-index ~/Projects/shiro into memory on every launch"
+                description: "Re-index \(Config.projectRoot) into memory on every launch"
             ),
             Hook(
                 name: "watch-projects",
