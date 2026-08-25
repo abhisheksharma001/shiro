@@ -43,6 +43,15 @@ final class AppState: ObservableObject {
 
     private init() {}
 
+    /// Tear down long-running services on quit.
+    /// Called from AppDelegate.applicationWillTerminate — cancels the Telegram
+    /// long-poll session, hook timers/watchers, and the bridge process.
+    func shutdown() {
+        telegramRelay?.stop()
+        hooksEngine?.stop()
+        bridgeRouter?.stop()
+    }
+
     func initialize() async {
         do {
             // 1. Database

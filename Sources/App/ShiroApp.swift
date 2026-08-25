@@ -47,6 +47,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         floatingBarController?.showWindow(nil)
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        AppState.shared.shutdown()
+    }
+
     @objc private func showFloatingBar() {
         floatingBarController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)

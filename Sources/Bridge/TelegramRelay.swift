@@ -62,6 +62,10 @@ final class TelegramRelay {
         polling = false
         pollTask?.cancel()
         pollTask = nil
+        // Cancel any in-flight long-poll immediately so app quit isn't blocked
+        // for up to the 25s long-poll timeout. The relay is never restarted
+        // after stop(), so invalidating the session is safe.
+        wsSession.invalidateAndCancel()
     }
 
     // MARK: - Send approval card
