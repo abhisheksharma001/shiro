@@ -23,7 +23,7 @@ Built on the patterns of [Fazm](https://github.com/mediar-ai/fazm) — rebuilt l
 
 ## Status
 
-**Alpha / heavy WIP.** Phase 0 (foundation) is committed. Phase 1 (Node bridge) is active. See [`PLAN.md`](./PLAN.md) for the full build spec — every module designed before a line ships.
+**Alpha / heavy WIP.** All 7 planned phases are built and compile clean (Swift + TypeScript) — see [`HANDOFF.md`](./HANDOFF.md). Not yet runtime-tested end-to-end (needs a local LM Studio / Ollama running). See [`PLAN.md`](./PLAN.md) for the full build spec — every module designed before a line ships.
 
 ---
 
@@ -72,22 +72,32 @@ All run simultaneously in LM Studio (~29 GB resident).
 ```bash
 git clone https://github.com/abhisheksharma001/shiro.git
 cd shiro
-./setup.sh          # installs Node bridge deps + MCP servers
-open Shiro.xcworkspace   # build & run in Xcode with ⌘R
+./setup.sh          # installs Node bridge deps, compiles acp-bridge/dist/,
+                    # and creates ~/.shiro config directories
+swift build         # build the Swift app (SwiftPM — no .xcodeproj needed)
+swift run           # run it
 ```
 
-Requires macOS 14+ (Sonoma), Xcode 15+, and LM Studio or Ollama running locally.
+`acp-bridge/dist/` must exist before the Swift app launches the bridge — `./setup.sh`
+builds it; re-run `cd acp-bridge && npm run build` after changing bridge code.
+
+Requires macOS 14+ (Sonoma), Xcode 15+ / Swift toolchain, Node 20+, and LM Studio or Ollama running locally.
+
+Open in Xcode with `open Package.swift` if you prefer an IDE (Xcode treats a
+SwiftPM package as a full project).
 
 ---
 
 ## Roadmap
 
 - [x] Phase 0 — project scaffold, agent coordinator, bridge architecture
-- [ ] Phase 1 — Node/ACP bridge fork, LM Studio proxy
-- [ ] Phase 2 — hybrid RAG + knowledge graph
-- [ ] Phase 3 — MCP registry + bundled servers
-- [ ] Phase 4 — meeting mode (audio + STT + action items)
-- [ ] Phase 5 — skills system + slash commands
+- [x] Phase 1 — Node/ACP bridge fork, LM Studio proxy
+- [x] Phase 2 — hybrid RAG + knowledge graph
+- [x] Phase 2.5 — Telegram consent relay
+- [x] Phase 3 — MCP registry + bundled servers
+- [x] Phase 4 — skills system + slash commands
+- [x] Phase 5 — hooks engine (file watch / schedule / app launch)
+- [x] Phase 6 — meeting mode UI (live transcript + summaries)
 
 ---
 
