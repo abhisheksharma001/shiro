@@ -85,12 +85,29 @@ final class Ingestor {
 
     /// Recursively ingest a directory. Skips hidden dirs and node_modules.
     func ingestDirectory(_ dirPath: String, corpus: String? = nil) async throws {
+        // Collect paths synchronously first: FileManager's enumerator isn't
+        // safe to drive across await suspension points (Swift 6 warning).
+        let filePaths = collectFiles(in: dirPath)
+
+        // Process sequentially to avoid hammering LM Studio
+        for path in filePaths {
+            do {
+                try await ingestFile(path, corpus: corpus)
+            } catch {
+                print("[Ingestor] ⚠️  Skip \(path): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Walk `dirPath` and return regular-file paths, skipping hidden dirs,
+    /// packages, and generated/large directories.
+    private func collectFiles(in dirPath: String) -> [String] {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(
             at: URL(fileURLWithPath: dirPath),
             includingPropertiesForKeys: [.isRegularFileKey, .isHiddenKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        ) else { return }
+        ) else { return [] }
 
         var filePaths: [String] = []
         for case let fileURL as URL in enumerator {
@@ -108,15 +125,7 @@ final class Ingestor {
                 filePaths.append(fileURL.path)
             }
         }
-
-        // Process sequentially to avoid hammering LM Studio
-        for path in filePaths {
-            do {
-                try await ingestFile(path, corpus: corpus)
-            } catch {
-                print("[Ingestor] ⚠️  Skip \(path): \(error.localizedDescription)")
-            }
-        }
+        return filePaths
     }
 
     // MARK: - Chunking
