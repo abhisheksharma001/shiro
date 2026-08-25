@@ -139,17 +139,7 @@ export function loadRegistry(): MCPServerConfig[] {
     // Drop servers that are explicitly disabled OR whose command is a
     // placeholder — those configs would cause an obvious spawn error
     // at query time. Better to skip loudly at load time.
-    const PLACEHOLDER_COMMANDS = new Set(["unavailable", "placeholder", ""]);
-    const enabled: MCPServerConfig[] = [];
-    for (const s of servers) {
-      if (s.enabled === false) continue;
-      const cmd = (s.command ?? "").trim();
-      if (PLACEHOLDER_COMMANDS.has(cmd.toLowerCase())) {
-        process.stderr.write(`[mcp-registry] skipping server '${s.name}' — placeholder command '${cmd}'\n`);
-        continue;
-      }
-      enabled.push(s);
-    }
+    const enabled = filterEnabledServers(servers);
     process.stderr.write(`[mcp-registry] loaded ${enabled.length}/${servers.length} servers from ${path}\n`);
     return enabled;
   } catch (err) {
@@ -158,12 +148,31 @@ export function loadRegistry(): MCPServerConfig[] {
   }
 }
 
+/**
+ * Drop explicitly-disabled servers and servers whose command is a known
+ * placeholder ("unavailable", "placeholder", ""). Exported for tests.
+ */
+export function filterEnabledServers(servers: MCPServerConfig[]): MCPServerConfig[] {
+  const PLACEHOLDER_COMMANDS = new Set(["unavailable", "placeholder", ""]);
+  const enabled: MCPServerConfig[] = [];
+  for (const s of servers) {
+    if (s.enabled === false) continue;
+    const cmd = (s.command ?? "").trim();
+    if (PLACEHOLDER_COMMANDS.has(cmd.toLowerCase())) {
+      process.stderr.write(`[mcp-registry] skipping server '${s.name}' — placeholder command '${cmd}'\n`);
+      continue;
+    }
+    enabled.push(s);
+  }
+  return enabled;
+}
+
 // ---------------------------------------------------------------------------
 // Variable expansion
 // ---------------------------------------------------------------------------
 
-/** Replace ${VAR} in a string with process.env.VAR, falling back to the original placeholder. */
-function expandVars(str: string): string {
+/** Replace ${VAR} in a string with process.env.VAR, falling back to the original placeholder. Exported for tests. */
+export function expandVars(str: string): string {
   return str.replace(/\$\{([^}]+)\}/g, (match, varName: string) => {
     const val = process.env[varName];
     if (val !== undefined && val !== "") return val;

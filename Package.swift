@@ -24,5 +24,10 @@ let package = Package(
             exclude: ["App/Info.plist"]
             // Add .process("App/Assets.xcassets") here when you add an asset catalog.
         ),
+        .testTarget(
+            name: "ShiroTests",
+            dependencies: ["Shiro"],
+            path: "Tests/ShiroTests"
+        ),
     ]
 )
